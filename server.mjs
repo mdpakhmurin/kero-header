@@ -1,17 +1,16 @@
 import http from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, readdir, unlink } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaults, readJSON, writeJSON, validateSettings, validateLayout, validId, digest, saveImage } from './lib/storage.mjs';
-import { syncLibrary } from './lib/vk.mjs';
+import { defaults, readJSON, writeJSON, validateSettings, validId, digest, saveImage } from './lib/storage.mjs';
+import { syncLibrary, createVK } from './lib/vk.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 try { process.loadEnvFile(join(here, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 
-export async function createApp(root = here) {
+export async function createApp(root = here, { vkFactory = createVK } = {}) {
   let settings = validateSettings(await readJSON(join(root, 'config/settings.json'), defaults));
   let exclusions = await readJSON(join(root, 'config/exclusions.json'), []);
-  let layout = validateLayout(await readJSON(join(root, 'config/layout.json'), { items: [] }));
   let library = await readJSON(join(root, 'cache/library.json'), { photos: {}, lastSync: null });
   let token = process.env.VK_TOKEN || '';
   let sync = { running: false, message: '', warnings: [] };
@@ -31,13 +30,24 @@ export async function createApp(root = here) {
         const { url, hash, ...publicPhoto } = p;
         return { ...publicPhoto, available, src: `/images/${p.id}` };
       }));
-      return json(res, 200, { settings, exclusions, layout, photos, lastSync: library.lastSync, hasToken: Boolean(token), sync });
+      return json(res, 200, { settings, exclusions, photos, lastSync: library.lastSync, hasToken: Boolean(token), sync });
     }
     if (req.method === 'GET' && path === '/api/sync') return json(res, 200, sync);
     if (req.method !== 'POST') return json(res, 404, { error: 'Не найдено' });
     const input = await body(req);
     if (path === '/api/settings') { const next = validateSettings(input); await writeJSON(join(root, 'config/settings.json'), next); settings = next; return json(res, 200, settings); }
-    if (path === '/api/layout') { const next = validateLayout(input); await writeJSON(join(root, 'config/layout.json'), next); layout = next; return json(res, 200, layout); }
+    if (path === '/api/cache/clear') {
+      if (sync.running) return json(res, 409, { error: 'Дождитесь окончания синхронизации перед очисткой кеша' });
+      const directory = join(root, 'cache/images');
+      const files = await readdir(directory, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+      let removed = 0;
+      for (const file of files) {
+        if ((!file.isFile() && !file.isSymbolicLink()) || !file.name.endsWith('.img') || !validId(file.name.slice(0, -4))) continue;
+        try { await unlink(join(directory, file.name)); removed++; }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+      return json(res, 200, { removed });
+    }
     if (path === '/api/exclusions') {
       if (!Array.isArray(input) || input.length > 100000 || !input.every(validId)) throw new Error('Некорректный список исключений');
       const next = [...new Set(input)].sort();
@@ -46,7 +56,11 @@ export async function createApp(root = here) {
     }
     if (path === '/api/token') {
       if (typeof input.token !== 'string' || input.token.length > 4096) throw new Error('Некорректный токен');
-      token = input.token.trim(); return json(res, 200, { hasToken: Boolean(token) });
+      const candidate = input.token.trim();
+      if (candidate) await vkFactory(candidate)('utils.resolveScreenName', { screen_name: settings.community });
+      token = candidate;
+      if (!sync.running) sync = { running: false, message: '', warnings: [] };
+      return json(res, 200, { hasToken: Boolean(token), verified: Boolean(token) });
     }
     if (path === '/api/sync') {
       if (sync.running) return json(res, 409, { error: 'Синхронизация уже идёт' });

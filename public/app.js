@@ -11,6 +11,9 @@ async function api(path, data) {
 }
 function toast(message, error = false) { const el = $('#toast'); el.textContent = message; el.classList.toggle('error', error); el.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => el.hidden = true, error ? 9000 : 4000); }
 function report(error) { toast(error.message, true); }
+function syncMessage(progress) {
+  return progress.message + (progress.warnings?.length ? '\n' + progress.warnings.join('\n') : '');
+}
 function action(fn) { return async event => { try { await fn(event); } catch (e) { report(e); } }; }
 function save(path, value) {
   const snapshot = structuredClone(value);
@@ -19,7 +22,6 @@ function save(path, value) {
   result.catch(error => report(new Error(`Не удалось сохранить изменения: ${error.message}`)));
   return result;
 }
-function persistLayout() { return save('layout', { items }); }
 function checkpoint() { undo.push(structuredClone(items)); if (undo.length > 50) undo.shift(); $('#undo').disabled = false; }
 function available() { return state.photos.filter(p => p.available && !state.exclusions.includes(p.id) && (p.source === 'local' || p.community === state.settings.community)); }
 function visibleItems() { const ids = new Set(available().map(p => p.id)); return items.filter(i => ids.has(i.id)); }
@@ -87,9 +89,10 @@ async function loadImages() {
   await Promise.all(Array.from({ length: 4 }, worker)); loading = false;
 }
 async function refresh() {
-  const fresh = await api('state'); state = fresh; items = fresh.layout.items;
+  const fresh = await api('state'); state = fresh;
   fillForm(); await loadImages(); renderLibrary(); draw(); updateSelection();
   $('#sync').disabled = fresh.sync.running;
+  if (fresh.sync.error) { const el = $('#sync-status'); el.hidden = false; el.classList.add('error'); el.textContent = syncMessage(fresh.sync); }
   if (fresh.sync.running) pollSync();
 }
 function paint(context, width, height, drawSelection = false, imageMap = images) {
@@ -115,7 +118,6 @@ function paint(context, width, height, drawSelection = false, imageMap = images)
 function draw() {
   canvas.width = state.settings.width; canvas.height = state.settings.height;
   paint(ctx, canvas.width, canvas.height, true);
-  $('#empty').hidden = visibleItems().length > 0;
   $('#canvas-count').textContent = visibleItems().length;
   $('#dimensions').textContent = `${canvas.width} × ${canvas.height}`;
   $('#export').disabled = !visibleItems().length || loading;
@@ -143,7 +145,7 @@ function renderLibrary() {
     const choose = document.createElement('button'); choose.className = 'photo-image'; choose.title = photo.available ? 'Выбрать на холсте или добавить в композицию' : 'Нет файла в кеше: выполните синхронизацию или импортируйте снова'; choose.setAttribute('aria-label', photo.title); choose.disabled = !photo.available || excluded.has(photo.id);
     if (photo.available) { const img = document.createElement('img'); img.src = photo.src; img.loading = 'lazy'; img.alt = photo.title; choose.append(img); } else choose.textContent = 'Нет файла';
     choose.onclick = action(async () => {
-      if (!items.some(i => i.id === photo.id)) { checkpoint(); items.push({ id: photo.id, x: canvas.width / 2, y: canvas.height / 2, width: state.settings.maxSize, angle: 0 }); await loadImages(); await persistLayout(); }
+      if (!items.some(i => i.id === photo.id)) { checkpoint(); items.push({ id: photo.id, x: canvas.width / 2, y: canvas.height / 2, width: state.settings.maxSize, angle: 0 }); await loadImages(); }
       selected = photo.id; draw(); updateSelection(); renderLibrary();
     });
     const toggle = document.createElement('button'); toggle.className = 'photo-toggle'; toggle.textContent = excluded.has(photo.id) ? '↶' : '×'; toggle.title = excluded.has(photo.id) ? 'Вернуть в генерацию' : 'Исключить из будущих генераций'; toggle.setAttribute('aria-label', toggle.title); toggle.onclick = action(() => toggleExclusion(photo.id));
@@ -170,7 +172,7 @@ async function shuffle() {
   const seed = (state.settings.seed + 1 + Math.floor(Math.random() * 2147483647)) % 2147483648;
   await updateSettings({ seed });
   checkpoint(); items = generate(available(), state.settings); selected = null;
-  await loadImages(); draw(); updateSelection(); renderLibrary(); await persistLayout();
+  await loadImages(); draw(); updateSelection(); renderLibrary();
 }
 form.addEventListener('submit', e => e.preventDefault());
 form.addEventListener('input', event => { if (event.target.id !== 'preset') updateLabels(); });
@@ -191,16 +193,16 @@ canvas.onpointerdown = event => {
   draw(); updateSelection(); renderLibrary();
 };
 canvas.onpointermove = event => { if (!drag) return; const p = point(event); drag.item.x = Math.max(-10000, Math.min(20000, p.x - drag.x)); drag.item.y = Math.max(-10000, Math.min(20000, p.y - drag.y)); draw(); };
-const endDrag = action(async () => { if (drag) { drag = null; await persistLayout(); } });
+const endDrag = () => { drag = null; };
 canvas.onpointerup = endDrag; canvas.onpointercancel = endDrag;
 canvas.addEventListener('wheel', event => {
   const item = items.find(i => i.id === selected); if (!item) return;
   event.preventDefault(); if (!wheelTimer) checkpoint();
   if (event.shiftKey) item.angle = (item.angle + Math.sign(event.deltaY) * 2) % 360;
   else item.width = Math.max(10, Math.min(10000, item.width * (event.deltaY > 0 ? .95 : 1.05)));
-  draw(); updateSelection(); clearTimeout(wheelTimer); wheelTimer = setTimeout(() => { wheelTimer = null; persistLayout().catch(() => {}); }, 250);
+  draw(); updateSelection(); clearTimeout(wheelTimer); wheelTimer = setTimeout(() => { wheelTimer = null; }, 250);
 }, { passive: false });
-async function editSelected(fn) { const item = items.find(i => i.id === selected); if (!item) return; checkpoint(); fn(item); draw(); updateSelection(); await persistLayout(); }
+async function editSelected(fn) { const item = items.find(i => i.id === selected); if (!item) return; checkpoint(); fn(item); draw(); updateSelection(); }
 for (const key of ['width', 'angle']) $(`#item-${key}`).onchange = action(event => {
   if (!event.target.reportValidity()) return;
   return editSelected(item => item[key] = Number(event.target.value));
@@ -209,7 +211,7 @@ $('#to-front').onclick = action(() => editSelected(item => { items = items.filte
 $('#to-back').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); items.unshift(item); }));
 $('#remove').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); selected = null; }));
 $('#exclude-selected').onclick = action(() => selected && toggleExclusion(selected));
-$('#undo').onclick = action(async () => { if (!undo.length) return; items = undo.pop(); selected = null; await loadImages(); draw(); updateSelection(); await persistLayout(); });
+$('#undo').onclick = action(async () => { if (!undo.length) return; items = undo.pop(); selected = null; await loadImages(); draw(); updateSelection(); });
 window.addEventListener('keydown', event => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName) || $('#connect-dialog').open) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); $('#undo').click(); }
@@ -219,7 +221,7 @@ window.addEventListener('keydown', event => {
 $('#export').onclick = action(async () => {
   const button = $('#export'); button.disabled = true; button.textContent = 'Готовим PNG…';
   try {
-    await saveQueue; await persistLayout();
+    await saveQueue;
     const exportItems = structuredClone(visibleItems()), s = structuredClone(state.settings);
     // Export originals one at a time to keep memory bounded, even for a large archive.
     const output = document.createElement('canvas'); output.width = s.width; output.height = s.height;
@@ -241,7 +243,20 @@ $('#export').onclick = action(async () => {
 });
 document.querySelectorAll('.filter').forEach(b => b.onclick = () => { filter = b.dataset.filter; limit = 80; renderLibrary(); });
 $('#search').oninput = () => { limit = 80; renderLibrary(); }; $('#load-more').onclick = () => { limit += 80; renderLibrary(); };
-for (const id of ['import', 'empty-import']) $(`#${id}`).onclick = () => $('#file-input').click();
+$('#import').onclick = () => $('#file-input').click();
+$('#clear-cache').onclick = action(async () => {
+  if (loading) throw new Error('Дождитесь загрузки изображений');
+  if (!confirm('Удалить все изображения из локального кеша? Фото VK можно скачать повторно синхронизацией. Файлы, добавленные с компьютера, потребуется импортировать снова. Настройки и исключения сохранятся.')) return;
+  const button = $('#clear-cache'); button.disabled = true;
+  try {
+    await saveQueue;
+    const result = await api('cache/clear', {});
+    items = []; undo = []; selected = null; drag = null;
+    for (const bitmap of images.values()) bitmap.close(); images.clear();
+    await refresh();
+    toast(`Кеш очищен. Удалено файлов: ${result.removed}.`);
+  } finally { button.disabled = false; }
+});
 $('#file-input').onchange = action(async event => {
   const files = [...event.target.files]; if (!files.length) return;
   $('#import').disabled = true; let imported = 0; const errors = [];
@@ -263,14 +278,21 @@ $('#file-input').onchange = action(async event => {
 function openConnection() {
   const f = $('#connect-form'); f.elements.community.value = `https://vk.ru/${state.settings.community}`; f.elements.source.value = state.settings.source; f.elements.token.value = '';
   f.elements.token.placeholder = state.hasToken ? 'Токен уже задан. Оставьте пустым, чтобы сохранить.' : 'Вставьте токен VK'; $('#connect-dialog').showModal();
+  $('#connection-error').hidden = true;
 }
-$('#connection').onclick = openConnection; $('#close-dialog').onclick = () => $('#connect-dialog').close();
+$('#sync-settings').onclick = openConnection; $('#close-dialog').onclick = () => $('#connect-dialog').close();
 $('#connect-form').onsubmit = action(async event => {
   event.preventDefault(); const f = event.target;
-  const next = await save('settings', { ...state.settings, community: f.elements.community.value, source: f.elements.source.value });
-  state.settings = next;
-  if (f.elements.token.value.trim()) { await api('token', { token: f.elements.token.value }); state.hasToken = true; f.elements.token.value = ''; }
-  $('#connect-dialog').close(); renderLibrary(); draw(); toast('Подключение сохранено. Теперь можно синхронизировать фотографии.');
+  const button = f.querySelector('button[type="submit"]'), error = $('#connection-error');
+  const candidate = f.elements.token.value.trim();
+  button.disabled = true; button.textContent = candidate ? 'Проверяем доступ к VK…' : 'Сохраняем…'; error.hidden = true;
+  try {
+    const next = await save('settings', { ...state.settings, community: f.elements.community.value, source: f.elements.source.value });
+    state.settings = next;
+    if (candidate) { await api('token', { token: candidate }); state.hasToken = true; f.elements.token.value = ''; $('#sync-status').hidden = true; }
+    $('#connect-dialog').close(); renderLibrary(); draw(); toast(candidate ? 'VK подтвердил доступ. Токен сохранён в памяти сервера.' : 'Настройки сохранены.');
+  } catch (e) { error.textContent = e.message; error.hidden = false; }
+  finally { button.disabled = false; button.textContent = 'Сохранить подключение'; }
 });
 $('#forget-token').onclick = action(async () => { await api('token', { token: '' }); state.hasToken = false; $('#connect-form').elements.token.value = ''; $('#connect-form').elements.token.placeholder = 'Вставьте токен VK'; toast('Токен удалён из памяти сервера. Если он задан в .env, удалите его и там.'); });
 $('#sync').onclick = action(async () => { if (!state.hasToken) { openConnection(); return; } await saveQueue; await api('sync', {}); pollSync(); });
@@ -278,7 +300,7 @@ async function pollSync() {
   if (polling) return; polling = true; $('#sync').disabled = true;
   try {
     while (true) {
-      const progress = await api('sync'), el = $('#sync-status'); el.hidden = false; el.classList.toggle('error', Boolean(progress.error || progress.failed || progress.warnings.length)); el.textContent = progress.message + (progress.warnings?.length ? '\n' + progress.warnings.join('\n') : '');
+      const progress = await api('sync'), el = $('#sync-status'); el.hidden = false; el.classList.toggle('error', Boolean(progress.error || progress.failed || progress.warnings.length)); el.textContent = syncMessage(progress);
       if (!progress.running) { await saveQueue; await refresh(); if (!items.length && available().length) await shuffle(); break; }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }

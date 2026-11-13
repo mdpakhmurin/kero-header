@@ -80,13 +80,21 @@ test('partial VK access retains photos and reports warnings', async t => {
 });
 test('VK token is sent in POST body, API errors do not leak it', async () => {
   const call = createVK('secret-fixture', { delay: 0, fetcher: async (url, options) => {
+    assert.equal(url, 'https://api.vk.ru/method/photos.getAll');
     assert.ok(!url.includes('secret')); assert.equal(options.body.get('access_token'), 'secret-fixture');
     return { ok: true, json: async () => ({ error: { error_code: 5, error_msg: 'secret-fixture' } }) };
   } });
   await assert.rejects(call('photos.getAll', {}), e => e.message.includes('ошибка 5') && !e.message.includes('secret'));
 });
 test('HTTP import, persistence, missing-file detection and local-only protection', async t => {
-  const root = await fixture(t); let server = await createApp(root);
+  const root = await fixture(t);
+  const checks = [];
+  const vkFactory = candidate => async (method, params) => {
+    checks.push({ candidate, method, params });
+    if (candidate !== 'test-secret') throw new Error('VK: ошибка 5. Test authorization denied');
+    return { type: 'group', object_id: 123 };
+  };
+  let server = await createApp(root, { vkFactory });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
   let base = `http://127.0.0.1:${server.address().port}`;
@@ -98,14 +106,31 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   const { id } = await (await post('/api/import', { name: 'test.png', data: png.toString('base64') })).json();
   assert.match(id, /^local_/); assert.equal((await fetch(base + '/images/' + id)).headers.get('content-type'), 'image/png');
   await post('/api/settings', { ...defaults, rotation: 50 });
-  await post('/api/layout', { items: [{ id, x: 120, y: 80, width: 200, angle: -25 }] });
-  await post('/api/exclusions', [id]); await post('/api/token', { token: 'test-secret' });
+  assert.equal((await post('/api/layout', { items: [{ id, x: 120, y: 80, width: 200, angle: -25 }] })).status, 404);
+  await assert.rejects(readFile(join(root, 'config/layout.json')), { code: 'ENOENT' });
+  await post('/api/exclusions', [id]);
+  assert.equal((await post('/api/token', { token: 'invalid-fixture' })).status, 400);
+  assert.equal((await (await fetch(base + '/api/state')).json()).hasToken, Boolean(process.env.VK_TOKEN));
+  assert.equal((await (await post('/api/token', { token: ' test-secret ' })).json()).verified, true);
+  assert.equal(checks.at(-1).candidate, 'test-secret');
+  assert.equal(checks.at(-1).method, 'utils.resolveScreenName');
+  assert.equal(checks.at(-1).params.screen_name, defaults.community);
   let state = await (await fetch(base + '/api/state')).json();
   assert.equal(state.hasToken, true); assert.ok(!JSON.stringify(state).includes('test-secret')); assert.equal(state.photos[0].available, true);
   assert.equal(JSON.parse(await readFile(join(root, 'config/exclusions.json'), 'utf8'))[0], id);
-  server.close(); await once(server, 'close'); server = await createApp(root);
+  assert.equal('layout' in state, false);
+  // Old layout files must not affect startup or be returned to the browser.
+  await writeFile(join(root, 'config/layout.json'), 'obsolete layout');
+  server.close(); await once(server, 'close'); server = await createApp(root, { vkFactory });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${server.address().port}`;
   state = await (await fetch(base + '/api/state')).json();
-  assert.equal(state.settings.rotation, 50); assert.equal(state.layout.items[0].angle, -25); assert.deepEqual(state.exclusions, [id]);
-  await unlink(join(root, 'cache/images', `${id}.img`)); state = await (await fetch(base + '/api/state')).json(); assert.equal(state.photos[0].available, false);
+  assert.equal(state.settings.rotation, 50); assert.equal('layout' in state, false); assert.deepEqual(state.exclusions, [id]);
+  await writeFile(join(root, 'cache/images/keep.txt'), 'unrelated file');
+  assert.equal((await post('/api/cache/clear', {}, { Origin: 'https://evil.example' })).status, 403);
+  assert.equal((await (await post('/api/cache/clear', {})).json()).removed, 1);
+  assert.equal((await (await post('/api/cache/clear', {})).json()).removed, 0);
+  state = await (await fetch(base + '/api/state')).json();
+  assert.equal(state.photos[0].available, false); assert.equal(state.photos.length, 1);
+  assert.equal(state.settings.rotation, 50); assert.deepEqual(state.exclusions, [id]);
+  assert.equal(await readFile(join(root, 'cache/images/keep.txt'), 'utf8'), 'unrelated file');
 });
