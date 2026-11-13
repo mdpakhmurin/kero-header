@@ -1,0 +1,111 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile, unlink, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { once } from 'node:events';
+import { defaults, validateSettings, validateLayout, cacheValid } from '../lib/storage.mjs';
+import { syncLibrary, paginate, wallPhotos, createVK, connectionError } from '../lib/vk.mjs';
+import { createApp } from '../server.mjs';
+import { generate, hitTest } from '../public/collage.js';
+
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64');
+async function fixture(t) { const root = await mkdtemp(join(tmpdir(), 'kero-test-')); t.after(() => rm(root, { recursive: true, force: true })); return root; }
+const status = () => ({ done: 0, total: 0, downloaded: 0, cached: 0, skipped: 0, failed: 0, warnings: [] });
+const photo = id => ({ owner_id: -123, id, sizes: [{ width: 100, height: 100, url: `https://example.com/${id}.png` }] });
+
+test('network errors explain the cause without exposing request secrets', async () => {
+  let calls = 0;
+  const call = createVK('private-token', { delay: 0, fetcher: async () => {
+    calls++;
+    throw Object.assign(new Error('private-token'), { cause: { code: 'EACCES' } });
+  } });
+  await assert.rejects(call('utils.resolveScreenName', {}), e => /EACCES/.test(e.message) && !e.message.includes('private-token'));
+  assert.equal(calls, 1);
+  assert.match(connectionError({ cause: { code: 'ENOTFOUND' } }), /DNS/);
+  assert.match(connectionError({ name: 'TimeoutError' }), /время/);
+  assert.match(connectionError({ httpStatus: 503 }), /HTTP 503/);
+  assert.match(connectionError(new SyntaxError('private-token')), /JSON/);
+});
+
+test('deterministic generation includes every photo once and respects ranges', () => {
+  const photos = Array.from({ length: 120 }, (_, i) => ({ id: `vk_-1_${i}` }));
+  const a = generate(photos, defaults), b = generate([...photos].reverse(), defaults);
+  assert.deepEqual(a, b); assert.equal(new Set(a.map(i => i.id)).size, 120);
+  assert.ok(a.every(i => i.width >= defaults.minSize && i.width <= defaults.maxSize && Math.abs(i.angle) <= defaults.rotation));
+  assert.notDeepEqual(a, generate(photos, { ...defaults, seed: 43 }));
+  assert.equal(generate(photos, { ...defaults, count: 7 }).length, 7);
+  assert.deepEqual(generate([], defaults), []);
+});
+test('hit testing respects rotation and image aspect ratio', () => {
+  const item = { x: 100, y: 100, width: 100, angle: 90 };
+  assert.ok(hitTest(item, .2, 100, 140)); assert.ok(!hitTest(item, .2, 140, 100));
+});
+test('settings and layout reject invalid dimensions and path-like IDs', () => {
+  assert.throws(() => validateSettings({ ...defaults, width: 8192, height: 8192 }));
+  assert.throws(() => validateSettings({ ...defaults, minSize: 999 }));
+  assert.throws(() => validateLayout({ items: [{ id: '../../.env', x: 1, y: 1, width: 100, angle: 0 }] }));
+  assert.equal(validateSettings({ ...defaults, community: 'https://vk.ru/kero_comics' }).community, 'kero_comics');
+});
+test('pagination continues across pages; repost attachments are included', async () => {
+  const offsets = [], result = [];
+  await paginate(async (_, args) => { offsets.push(args.offset); return { count: 5, items: Array.from({ length: Math.min(2, 5 - args.offset) }, (_, i) => i + args.offset) }; }, 'photos.getAll', {}, 2, items => result.push(...items));
+  assert.deepEqual(offsets, [0, 2, 4]); assert.deepEqual(result, [0, 1, 2, 3, 4]);
+  assert.equal(wallPhotos({ attachments: [{ type: 'photo', photo: photo(1) }], copy_history: [{ attachments: [{ type: 'photo', photo: photo(2) }] }] }).length, 2);
+  await assert.rejects(paginate(async () => ({ count: 5, items: [] }), 'wall.get', {}, 100, () => {}));
+});
+test('sync deduplicates, reuses cache, repairs missing/corrupt files and skips exclusions', async t => {
+  const root = await fixture(t), library = { photos: {} }; let downloads = 0;
+  const call = async method => method === 'utils.resolveScreenName' ? { type: 'group', object_id: 123 } : method === 'photos.getAll' ? { count: 2, items: [photo(1), photo(2)] } : { count: 1, items: [{ attachments: [{ type: 'photo', photo: photo(1) }] }] };
+  const run = async exclusions => { const s = status(); await syncLibrary({ root, settings: defaults, library, exclusions, status: s, call, download: async () => { downloads++; return png; } }); return s; };
+  assert.equal((await run([])).downloaded, 2); assert.equal(downloads, 2);
+  assert.equal((await run([])).cached, 2); assert.equal(downloads, 2);
+  await unlink(join(root, 'cache/images/vk_-123_1.img'));
+  assert.equal((await run([])).downloaded, 1); assert.equal(downloads, 3);
+  await writeFile(join(root, 'cache/images/vk_-123_1.img'), 'broken');
+  assert.equal((await run([])).downloaded, 1); assert.equal(downloads, 4);
+  await unlink(join(root, 'cache/images/vk_-123_2.img'));
+  assert.equal((await run(['vk_-123_2'])).skipped, 1); assert.equal(downloads, 4);
+  assert.ok(await cacheValid(root, library.photos['vk_-123_1']));
+  assert.equal((await run([])).downloaded, 1);
+});
+test('partial VK access retains photos and reports warnings', async t => {
+  const root = await fixture(t), s = status(), library = { photos: {} };
+  await syncLibrary({ root, settings: defaults, library, exclusions: [], status: s, call: async method => {
+    if (method === 'utils.resolveScreenName') return { type: 'group', object_id: 123 };
+    if (method === 'photos.getAll') throw new Error('No album access');
+    return { count: 1, items: [{ attachments: [{ type: 'photo', photo: photo(3) }] }] };
+  }, download: async () => png });
+  assert.equal(s.downloaded, 1); assert.match(s.warnings[0], /No album access/);
+});
+test('VK token is sent in POST body, API errors do not leak it', async () => {
+  const call = createVK('secret-fixture', { delay: 0, fetcher: async (url, options) => {
+    assert.ok(!url.includes('secret')); assert.equal(options.body.get('access_token'), 'secret-fixture');
+    return { ok: true, json: async () => ({ error: { error_code: 5, error_msg: 'secret-fixture' } }) };
+  } });
+  await assert.rejects(call('photos.getAll', {}), e => e.message.includes('ошибка 5') && !e.message.includes('secret'));
+});
+test('HTTP import, persistence, missing-file detection and local-only protection', async t => {
+  const root = await fixture(t); let server = await createApp(root);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  let base = `http://127.0.0.1:${server.address().port}`;
+  const post = (path, value, headers = {}) => fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(value) });
+  assert.equal((await fetch(base)).status, 200);
+  assert.equal((await post('/api/settings', defaults, { Origin: 'https://evil.example' })).status, 403);
+  assert.equal((await fetch(base + '/.env')).status, 404);
+  assert.equal((await post('/api/import', { name: 'x.svg', data: Buffer.from('<svg></svg>').toString('base64') })).status, 400);
+  const { id } = await (await post('/api/import', { name: 'test.png', data: png.toString('base64') })).json();
+  assert.match(id, /^local_/); assert.equal((await fetch(base + '/images/' + id)).headers.get('content-type'), 'image/png');
+  await post('/api/settings', { ...defaults, rotation: 50 });
+  await post('/api/layout', { items: [{ id, x: 120, y: 80, width: 200, angle: -25 }] });
+  await post('/api/exclusions', [id]); await post('/api/token', { token: 'test-secret' });
+  let state = await (await fetch(base + '/api/state')).json();
+  assert.equal(state.hasToken, true); assert.ok(!JSON.stringify(state).includes('test-secret')); assert.equal(state.photos[0].available, true);
+  assert.equal(JSON.parse(await readFile(join(root, 'config/exclusions.json'), 'utf8'))[0], id);
+  server.close(); await once(server, 'close'); server = await createApp(root);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${server.address().port}`;
+  state = await (await fetch(base + '/api/state')).json();
+  assert.equal(state.settings.rotation, 50); assert.equal(state.layout.items[0].angle, -25); assert.deepEqual(state.exclusions, [id]);
+  await unlink(join(root, 'cache/images', `${id}.img`)); state = await (await fetch(base + '/api/state')).json(); assert.equal(state.photos[0].available, false);
+});

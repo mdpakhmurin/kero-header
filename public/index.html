@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ке’Ро — мастерская обложек</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/comic.css"></head>
+<body>
+  <main>
+    <div class="workspace">
+      <aside class="panel controls">
+        <form id="settings-form">
+          <label class="field-label">Размер обложки <select id="preset"><option value="1920,768">1920 × 768</option><option value="1590,400">1590 × 400</option><option value="custom">Свой размер</option></select></label>
+          <div class="pair"><label>Ширина<input name="width" type="number" min="100" max="8192"></label><span>×</span><label>Высота<input name="height" type="number" min="100" max="8192"></label></div>
+          <div class="divider"></div>
+          <label class="range-label">Размер фотографий <output id="photo-size-out"></output><input name="photoSize" type="range" min="20" max="4000" step="1"></label>
+          <label class="range-label">Случайное отклонение размера <output id="size-deviation-out"></output><input name="sizeDeviation" type="range" min="0" max="1990" step="1"></label>
+          <label class="range-label">Вращение <output id="rotation-out"></output><input name="rotation" type="range" min="0" max="180"></label>
+          <label class="range-label">Случайность позиций <output id="scatter-out"></output><input name="scatter" type="range" min="0" max="100"></label><div class="range-hints"><span>Ближе к сетке</span><span>Свободно</span></div>
+          <div class="divider"></div>
+          <label class="range-label">Рамка <output id="border-out"></output><input name="border" type="range" min="0" max="60"></label>
+          <label class="range-label">Тень <output id="shadow-out"></output><input name="shadow" type="range" min="0" max="100"></label>
+          <div class="color-row"><label for="background">Цвет фона</label><input id="background" name="background" type="color"></div>
+        </form>
+        <button id="generate" class="button accent full">✳ Перемешать кадры</button>
+      </aside>
+      <section class="editor-area">
+        <div class="panel editor"><div class="editor-top"><div class="tabs"><span class="active">Обложка</span><span id="dimensions">1920 × 768</span></div><div class="editor-actions"><button id="connection" class="button light small">Подключение VK</button><button id="export" class="button dark small">Скачать PNG ↗</button><button id="undo" class="icon-button" title="Отменить (Ctrl+Z)" aria-label="Отменить">↶</button></div></div>
+          <div class="canvas-wrap"><canvas id="canvas" width="1920" height="768" aria-label="Редактор коллажа. Выбирайте фото мышью или в библиотеке."></canvas><div id="empty" class="empty"><img class="empty-comic" src="/assets/okak.png" alt="Кот под душем из комикса Ке’Ро. ОКАК."><div class="empty-copy"><h2>А кадры где?</h2><p>Принесите фотографии из паблика<br>или с компьютера.<br>Дальше устроим небольшой беспорядок.</p><button id="empty-import" class="button dark">＋ Добавить фотографии</button><span class="hand-note">вот с этой кнопки и начнём ↖</span></div></div></div>
+          <div class="editor-bottom"><span><span class="dot"></span> <b id="canvas-count">0</b> кадров на холсте</span><span>Перетаскивайте фото · Колесо — размер · Shift + колесо — поворот</span></div>
+        </div>
+        <div id="selection-panel" class="panel selection"><span class="selection-title">Выберите кадр на холсте</span><div id="selection-controls" hidden><label>Размер <input id="item-width" type="number" min="10" max="10000"></label><label>Угол <input id="item-angle" type="number" min="-36000" max="36000"></label><button id="to-back" class="button light small">На задний план</button><button id="to-front" class="button light small">На передний</button><button id="remove" class="button light small">Убрать с холста</button><button id="exclude-selected" class="button danger small">Исключить навсегда</button></div></div>
+        <section class="panel library"><div class="library-top"><div><div class="small-label">ДЕЙСТВУЮЩИЕ ЛИЦА</div><h2>Все в кадре <span id="library-count">0</span></h2></div><div class="library-actions"><button id="import" class="button light">＋ Добавить файлы</button><button id="sync" class="button dark">⟳ Синхронизировать VK</button></div></div>
+          <div class="library-filters"><div class="filter-buttons"><button class="filter active" data-filter="active">Доступные <b id="active-count">0</b></button><button class="filter" data-filter="excluded">Исключённые <b id="excluded-count">0</b></button><button class="filter" data-filter="missing">Нет в кеше <b id="missing-count">0</b></button></div><input id="search" type="search" placeholder="Найти кадр…" aria-label="Найти кадр"></div>
+          <div id="sync-status" class="sync-status" role="status" hidden></div><div id="library-grid" class="library-grid"></div><div id="library-empty" class="library-empty">Здесь будет ваша коллекция. Изображения сохраняются на компьютере и не скачиваются повторно.</div><button id="load-more" class="text-button full" hidden>Показать ещё 80</button>
+          <div class="library-footer"><span>◈ Кеш хранится на этом компьютере</span><span>Настройки и исключения готовы для Git</span></div>
+        </section>
+      </section>
+    </div>
+    <footer><span class="footer-signature">Ке’Ро</span></footer>
+  </main>
+  <input id="file-input" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+  <dialog id="connect-dialog"><form id="connect-form"><div class="dialog-heading"><h2>Подключение VK</h2><button type="button" id="close-dialog" class="icon-button" aria-label="Закрыть">×</button></div><p>Фотографии загружаются через API VK. Нужен токен, которому доступны выбранные методы чтения фото и стены.</p><label class="field-label">Ссылка на сообщество<input name="community" type="url" placeholder="https://vk.ru/kero_comics" required></label><label class="field-label">Откуда брать фото<select name="source"><option value="both">Альбомы и фотографии из постов</option><option value="albums">Только альбомы</option><option value="wall">Только фотографии из постов</option></select></label><label class="field-label">Токен доступа<input name="token" type="password" autocomplete="off" placeholder="Вставьте токен VK"></label><p class="note" id="token-note">Токен хранится только в памяти сервера до его перезапуска. Для постоянного подключения можно задать VK_TOKEN в локальном файле .env.</p><a href="https://dev.vk.com/ru/api/access-token/getting-started" target="_blank" rel="noreferrer">О токенах доступа в документации VK ↗</a><div class="dialog-footer"><button id="forget-token" type="button" class="text-button">Забыть токен</button><button class="button accent" type="submit">Сохранить подключение</button></div></form></dialog>
+  <div id="toast" role="status" hidden></div><script type="module" src="/app.js"></script>
+</body></html>

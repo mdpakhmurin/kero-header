@@ -1,0 +1,104 @@
+import http from 'node:http';
+import { readFile, stat } from 'node:fs/promises';
+import { join, dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { defaults, readJSON, writeJSON, validateSettings, validateLayout, validId, digest, saveImage } from './lib/storage.mjs';
+import { syncLibrary } from './lib/vk.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+try { process.loadEnvFile(join(here, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+
+export async function createApp(root = here) {
+  let settings = validateSettings(await readJSON(join(root, 'config/settings.json'), defaults));
+  let exclusions = await readJSON(join(root, 'config/exclusions.json'), []);
+  let layout = validateLayout(await readJSON(join(root, 'config/layout.json'), { items: [] }));
+  let library = await readJSON(join(root, 'cache/library.json'), { photos: {}, lastSync: null });
+  let token = process.env.VK_TOKEN || '';
+  let sync = { running: false, message: '', warnings: [] };
+  let mutation = Promise.resolve();
+  const json = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)); };
+  async function body(req) {
+    if (!req.headers['content-type']?.startsWith('application/json')) throw new Error('Нужен Content-Type application/json');
+    const chunks = []; let bytes = 0;
+    for await (const chunk of req) { bytes += chunk.length; if (bytes > 42_000_000) throw new Error('Файл слишком большой'); chunks.push(chunk); }
+    return JSON.parse(Buffer.concat(chunks).toString());
+  }
+  async function api(req, res, path) {
+    if (req.method === 'GET' && path === '/api/state') {
+      const photos = await Promise.all(Object.values(library.photos).map(async p => {
+        let available = false;
+        try { available = (await stat(join(root, 'cache/images', `${p.id}.img`))).size > 0; } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        const { url, hash, ...publicPhoto } = p;
+        return { ...publicPhoto, available, src: `/images/${p.id}` };
+      }));
+      return json(res, 200, { settings, exclusions, layout, photos, lastSync: library.lastSync, hasToken: Boolean(token), sync });
+    }
+    if (req.method === 'GET' && path === '/api/sync') return json(res, 200, sync);
+    if (req.method !== 'POST') return json(res, 404, { error: 'Не найдено' });
+    const input = await body(req);
+    if (path === '/api/settings') { const next = validateSettings(input); await writeJSON(join(root, 'config/settings.json'), next); settings = next; return json(res, 200, settings); }
+    if (path === '/api/layout') { const next = validateLayout(input); await writeJSON(join(root, 'config/layout.json'), next); layout = next; return json(res, 200, layout); }
+    if (path === '/api/exclusions') {
+      if (!Array.isArray(input) || input.length > 100000 || !input.every(validId)) throw new Error('Некорректный список исключений');
+      const next = [...new Set(input)].sort();
+      await writeJSON(join(root, 'config/exclusions.json'), next); exclusions = next;
+      return json(res, 200, exclusions);
+    }
+    if (path === '/api/token') {
+      if (typeof input.token !== 'string' || input.token.length > 4096) throw new Error('Некорректный токен');
+      token = input.token.trim(); return json(res, 200, { hasToken: Boolean(token) });
+    }
+    if (path === '/api/sync') {
+      if (sync.running) return json(res, 409, { error: 'Синхронизация уже идёт' });
+      if (!token) return json(res, 400, { error: 'Добавьте токен VK в настройках подключения' });
+      sync = { running: true, done: 0, total: 0, downloaded: 0, cached: 0, skipped: 0, failed: 0, message: 'Подключаемся к VK…', warnings: [] };
+      syncLibrary({ root, settings: { ...settings }, token, library, exclusions: [...exclusions], status: sync })
+        .catch(e => { sync.error = e.message; sync.message = e.message; }).finally(() => { sync.running = false; });
+      return json(res, 202, sync);
+    }
+    if (path === '/api/import') {
+      if (sync.running) return json(res, 409, { error: 'Дождитесь окончания синхронизации' });
+      if (typeof input.data !== 'string' || input.data.length > 40_000_000) throw new Error('Максимум 30 МБ на файл');
+      const data = Buffer.from(input.data, 'base64');
+      if (data.length > 30_000_000) throw new Error('Максимум 30 МБ на файл');
+      const id = `local_${digest(data)}`;
+      const metadata = await saveImage(root, id, data);
+      const photo = { id, source: 'local', title: String(input.name || 'Изображение').slice(0, 200), ...metadata };
+      library.photos[id] = photo;
+      await writeJSON(join(root, 'cache/library.json'), library);
+      return json(res, 200, { id });
+    }
+    return json(res, 404, { error: 'Не найдено' });
+  }
+  const server = http.createServer(async (req, res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    const allowed = new Set([`localhost:${server.address().port}`, `127.0.0.1:${server.address().port}`]);
+    if (!allowed.has(req.headers.host) || (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`)) return json(res, 403, { error: 'Доступ разрешён только локальному приложению' });
+    try {
+      const path = new URL(req.url, `http://${req.headers.host}`).pathname;
+      if (path.startsWith('/api/')) {
+        if (req.method === 'POST') { const task = mutation.then(() => api(req, res, path)); mutation = task.catch(() => {}); await task; }
+        else await api(req, res, path);
+        return;
+      }
+      if (req.method !== 'GET') return json(res, 405, { error: 'Метод не поддерживается' });
+      if (path.startsWith('/images/')) {
+        const id = path.slice(8);
+        if (!validId(id) || !library.photos[id]) return json(res, 404, { error: 'Фото не найдено' });
+        const data = await readFile(join(root, 'cache/images', `${id}.img`));
+        res.writeHead(200, { 'Content-Type': library.photos[id].mime || 'application/octet-stream', 'Cache-Control': 'no-cache' }); res.end(data); return;
+      }
+      const routes = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/comic.css': ['comic.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'] };
+      if (!routes[path]) return json(res, 404, { error: 'Не найдено' });
+      const [file, type] = routes[path];
+      res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-cache' }); res.end(await readFile(join(here, 'public', file)));
+    } catch (e) { if (!res.headersSent) json(res, e.code === 'ENOENT' ? 404 : 400, { error: e.message }); else res.end(); }
+  });
+  return server;
+}
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  const app = await createApp();
+  app.listen(Number(process.env.PORT || 3210), '127.0.0.1', () => console.log(`Kero Header → http://localhost:${app.address().port}`));
+}
