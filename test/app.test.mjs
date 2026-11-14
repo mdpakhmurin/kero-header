@@ -162,7 +162,7 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   assert.equal((await fetch(base)).status, 200);
   assert.equal((await fetch(base + '/library.js')).status, 200);
   assert.equal((await fetch(base + '/render.js')).status, 200);
-  for (const route of ['/settings.js', '/history.js', '/coverage.js', '/favicon.svg']) assert.equal((await fetch(base + route)).status, 200);
+  for (const route of ['/settings.js', '/history.js', '/coverage.js', '/viewer.js', '/favicon.svg']) assert.equal((await fetch(base + route)).status, 200);
   assert.match((await fetch(base + '/favicon.svg')).headers.get('content-type'), /image\/svg\+xml/);
   assert.equal((await post('/api/images/open-folder', {}, { Origin: 'https://evil.example' })).status, 403);
   assert.equal(openedFolders.length, 0);

@@ -3,10 +3,12 @@ import { photoSource } from './library.js';
 import { createPhotoRenderer, previewDimensions, renderDimensions, smooth } from './render.js';
 import { createHistory } from './history.js';
 import { emptySpacePercent } from './coverage.js';
+import { createPhotoViewer } from './viewer.js';
 const $ = selector => document.querySelector(selector);
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
 const preview = document.createElement('canvas'), photoRenderer = createPhotoRenderer();
 const history = createHistory();
+const photoViewer = createPhotoViewer($('#photo-viewer'));
 let state, items = [], selected = null, filter = 'active', limit = 80, images = new Map(), drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false, coverageTimer, coverageKey;
 let savedSettings, settingsSaving = false;
 const numeric = ['rotation', 'border', 'shadow'];
@@ -185,9 +187,11 @@ function renderLibrary() {
   for (const photo of list.slice(0, limit)) {
     const card = document.createElement('div'); card.className = `photo-card${excluded.has(photo.id) ? ' excluded' : ''}${selected === photo.id ? ' selected' : ''}`;
     const source = photoSource(photo);
-    const preview = document.createElement(source ? 'a' : 'div'); preview.className = 'photo-image';
-    if (source) { preview.href = source.href; preview.target = '_blank'; preview.rel = 'noopener noreferrer'; preview.title = source.label; preview.setAttribute('aria-label', `${source.label}: ${photo.title}`); }
-    else preview.title = 'Нет файла в кеше: импортируйте изображение снова';
+    const preview = document.createElement('button'); preview.type = 'button'; preview.className = 'photo-image';
+    preview.disabled = !photo.available;
+    preview.title = photo.available ? 'Посмотреть фото' : 'Нет файла в кеше: выполните синхронизацию или импортируйте снова';
+    preview.setAttribute('aria-label', `Посмотреть фото: ${photo.title}`);
+    preview.onclick = () => photoViewer.open(photo, list);
     if (photo.available) { const img = document.createElement('img'); img.src = photo.src; img.loading = 'lazy'; img.alt = photo.title; preview.append(img); } else preview.textContent = 'Нет файла';
     const choose = document.createElement('button'); choose.className = 'photo-toggle photo-add'; choose.type = 'button'; choose.textContent = '+'; choose.title = 'Выбрать на холсте или добавить в композицию'; choose.setAttribute('aria-label', `${choose.title}: ${photo.title}`); choose.disabled = !photo.available || excluded.has(photo.id);
     choose.onclick = action(async () => {
@@ -195,9 +199,13 @@ function renderLibrary() {
       selected = photo.id; draw(); updateSelection(); renderLibrary();
     });
     const toggle = document.createElement('button'); toggle.className = 'photo-toggle'; toggle.textContent = excluded.has(photo.id) ? '↶' : '×'; toggle.title = excluded.has(photo.id) ? 'Вернуть в генерацию' : 'Исключить из будущих генераций'; toggle.setAttribute('aria-label', toggle.title); toggle.onclick = action(() => toggleExclusion(photo.id));
-    const name = document.createElement(source ? 'a' : 'span'); name.className = 'photo-name'; name.textContent = source ? `${source.label} ↗` : photo.title; name.title = photo.title;
-    if (source) { name.href = source.href; name.target = '_blank'; name.rel = 'noopener noreferrer'; }
-    card.append(preview, choose, toggle, name); grid.append(card);
+    card.append(preview, choose, toggle);
+    if (source) {
+      const link = document.createElement('a'); link.className = 'photo-toggle photo-source'; link.textContent = '↗';
+      link.href = source.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = source.label;
+      link.setAttribute('aria-label', `${source.label}: ${photo.title}`); card.append(link);
+    }
+    grid.append(card);
   }
   $('#load-more').hidden = list.length <= limit;
   $('#library-empty').hidden = list.length > 0;
@@ -312,7 +320,7 @@ async function restoreHistory(direction) {
 $('#undo').onclick = action(() => restoreHistory('undo'));
 $('#redo').onclick = action(() => restoreHistory('redo'));
 window.addEventListener('keydown', event => {
-  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName) || $('#connect-dialog').open || $('#size-dialog').open) return;
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName) || $('#connect-dialog').open || $('#size-dialog').open || $('#photo-viewer').open) return;
   if (event.ctrlKey || event.metaKey) {
     const key = event.key.toLowerCase();
     if (key === 'y' || key === 'z' && event.shiftKey) { event.preventDefault(); $('#redo').click(); }
@@ -357,11 +365,6 @@ $('#export').onclick = action(async () => {
 document.querySelectorAll('.filter').forEach(b => b.onclick = () => { filter = b.dataset.filter; limit = 80; renderLibrary(); });
 $('#search').oninput = () => { limit = 80; renderLibrary(); }; $('#load-more').onclick = () => { limit += 80; renderLibrary(); };
 $('#import').onclick = () => $('#file-input').click();
-$('#open-images-folder').onclick = action(async () => {
-  const button = $('#open-images-folder'); button.disabled = true;
-  try { await api('images/open-folder', {}); }
-  finally { button.disabled = false; }
-});
 $('#clear-cache').onclick = action(async () => {
   if (loading) throw new Error('Дождитесь загрузки изображений');
   if (!confirm('Удалить все изображения из локального кеша? Фото VK можно скачать повторно синхронизацией. Файлы, добавленные с компьютера, потребуется импортировать снова. Настройки и исключения сохранятся.')) return;

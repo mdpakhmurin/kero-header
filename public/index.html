@@ -28,13 +28,18 @@
         <section class="panel library"><div class="library-top"><div><h2>Все в кадре <span id="library-count">0</span></h2></div><div class="library-actions"><button id="import" class="button light">＋ Добавить файлы</button><div class="sync-button-group" role="group" aria-label="Синхронизация и настройки VK"><button id="sync" class="button dark">⟳ Синхронизировать VK</button><button id="sync-settings" class="button dark" type="button" title="Настройки VK" aria-label="Настройки VK">⚙</button></div></div></div>
           <div class="library-filters"><div class="filter-buttons"><button class="filter active" data-filter="active">Доступные <b id="active-count">0</b></button><button class="filter" data-filter="excluded">Исключённые <b id="excluded-count">0</b></button><button class="filter" data-filter="missing">Нет в кеше <b id="missing-count">0</b></button></div><input id="search" type="search" placeholder="Найти кадр…" aria-label="Найти кадр"></div>
           <div id="sync-status" class="sync-status" role="status" hidden></div><div id="library-grid" class="library-grid"></div><div id="library-empty" class="library-empty">Здесь будет ваша коллекция. Изображения сохраняются на компьютере и не скачиваются повторно.</div><button id="load-more" class="text-button full" hidden>Показать ещё 80</button>
-          <div class="library-footer"><button id="open-images-folder" class="button light small" type="button">Открыть папку с фото</button><button id="clear-cache" class="button light small" type="button">Очистить кеш</button></div>
+          <div class="library-footer"><button id="clear-cache" class="button light small" type="button">Очистить кеш</button></div>
         </section>
       </section>
     </div>
     <footer><span class="footer-signature">Ке’Ро</span></footer>
   </main>
   <input id="file-input" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+  <dialog id="photo-viewer" aria-labelledby="viewer-title">
+    <div class="viewer-header"><h2 id="viewer-title">Просмотр фото</h2><div class="viewer-tools"><span id="viewer-position" aria-live="polite"></span><a id="viewer-source" class="icon-button" target="_blank" rel="noopener noreferrer" hidden>↗</a><button id="viewer-close" class="icon-button" type="button" aria-label="Закрыть просмотрщик" title="Закрыть (Esc)">×</button></div></div>
+    <div class="viewer-stage"><button id="viewer-previous" class="viewer-arrow" type="button" aria-label="Предыдущее фото" title="Предыдущее фото (←)">‹</button><div class="viewer-image-wrap"><img id="viewer-image" alt="" decoding="async"><div id="viewer-message" class="viewer-message" role="status" hidden></div></div><button id="viewer-next" class="viewer-arrow" type="button" aria-label="Следующее фото" title="Следующее фото (→)">›</button></div>
+    <div id="viewer-strip" class="viewer-strip" role="group" aria-label="Миниатюры фотографий"></div>
+  </dialog>
   <dialog id="size-dialog" aria-labelledby="size-dialog-title">
     <form id="size-form">
       <div class="dialog-heading"><h2 id="size-dialog-title">Новый размер обложки</h2><button type="button" id="close-size-dialog" class="icon-button" aria-label="Закрыть настройку размера">×</button></div>
