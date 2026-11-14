@@ -18,6 +18,7 @@
           <div class="color-row"><label for="background">Цвет фона</label><input id="background" name="background" type="color"></div>
         </form>
         <button id="generate" class="button accent full">✳ Перемешать кадры</button>
+        <div class="settings-save"><button id="save-settings" type="button" class="button light full" disabled>Сохранить настройки</button><small id="settings-save-status" role="status">Все изменения сохранены</small></div>
       </aside>
       <section class="editor-area">
         <div class="panel editor"><div class="editor-top"><div class="tabs"><span class="active">Обложка</span><span id="dimensions">1920 × 768</span></div><div class="editor-actions"><button id="export" class="button dark small">Скачать PNG ↗</button><button id="undo" class="icon-button" title="Отменить (Ctrl+Z)" aria-label="Отменить">↶</button></div></div>
@@ -38,7 +39,7 @@
   <dialog id="size-dialog" aria-labelledby="size-dialog-title">
     <form id="size-form">
       <div class="dialog-heading"><h2 id="size-dialog-title">Новый размер обложки</h2><button type="button" id="close-size-dialog" class="icon-button" aria-label="Закрыть настройку размера">×</button></div>
-      <p>Добавьте размер в список. После сохранения он сразу применится к обложке.</p>
+      <p>Новый размер сразу применится к обложке. Чтобы оставить его в списке после перезапуска, нажмите «Сохранить настройки» в панели слева.</p>
       <div class="pair"><label>Ширина, px<input name="width" type="number" min="100" max="8192" step="1" required></label><span>×</span><label>Высота, px<input name="height" type="number" min="100" max="8192" step="1" required></label></div>
       <div id="size-error" class="sync-status error" role="alert" hidden></div>
       <div class="dialog-footer"><button type="button" id="cancel-size" class="button light">Отмена</button><button type="submit" class="button accent">Добавить и выбрать</button></div>

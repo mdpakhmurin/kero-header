@@ -3,6 +3,7 @@ import { photoSource } from './library.js';
 const $ = selector => document.querySelector(selector);
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
 let state, items = [], selected = null, filter = 'active', limit = 80, images = new Map(), undo = [], drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false;
+let savedSettings, settingsSaving = false;
 const numeric = ['rotation', 'scatter', 'border', 'shadow'];
 async function api(path, data) {
   const response = await fetch(`/api/${path}`, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
@@ -65,10 +66,18 @@ function fillCoverSizes() {
   select.add(new Option('＋ Добавить размер…', 'custom'));
   select.value = `${state.settings.width},${state.settings.height}`;
 }
-async function updateSettings() {
-  const next = readSettings();
-  state.settings = await save('settings', next);
-  updateLabels(); draw();
+function hasUnsavedSettings() {
+  return savedSettings && JSON.stringify(state.settings) !== JSON.stringify(savedSettings);
+}
+function updateSaveStatus() {
+  const dirty = hasUnsavedSettings(), button = $('#save-settings');
+  button.disabled = !dirty || settingsSaving;
+  button.textContent = settingsSaving ? 'Сохраняем…' : 'Сохранить настройки';
+  $('#settings-save-status').textContent = dirty ? 'Есть несохранённые изменения' : 'Все изменения сохранены';
+}
+function updateSettings() {
+  state.settings = readSettings();
+  updateLabels(); draw(); updateSaveStatus();
 }
 async function loadImages() {
   loading = true;
@@ -96,8 +105,11 @@ async function loadImages() {
   await Promise.all(Array.from({ length: 4 }, worker)); loading = false;
 }
 async function refresh() {
-  const fresh = await api('state'); state = fresh;
-  fillForm(); await loadImages(); renderLibrary(); draw(); updateSelection();
+  const fresh = await api('state');
+  const draft = state && hasUnsavedSettings() ? state.settings : null;
+  savedSettings = structuredClone(fresh.settings); state = fresh;
+  if (draft) state.settings = draft;
+  fillForm(); updateSaveStatus(); await loadImages(); renderLibrary(); draw(); updateSelection();
   $('#sync').disabled = fresh.sync.running;
   if (fresh.sync.error) { const el = $('#sync-status'); el.hidden = false; el.classList.add('error'); el.textContent = syncMessage(fresh.sync); }
   if (fresh.sync.running) pollSync();
@@ -180,13 +192,13 @@ async function toggleExclusion(id) {
 async function shuffle() {
   if (loading) throw new Error('Дождитесь загрузки изображений');
   if (!available().length) throw new Error('Сначала добавьте фотографии');
-  await updateSettings();
+  updateSettings();
   checkpoint(); items = generate(available(), state.settings); selected = null;
   await loadImages(); draw(); updateSelection(); renderLibrary();
 }
 form.addEventListener('submit', e => e.preventDefault());
-form.addEventListener('input', event => { if (event.target.id !== 'preset') updateLabels(); });
-form.addEventListener('change', action(async e => {
+form.addEventListener('input', action(event => { if (event.target.id !== 'preset') { updateLabels(); updateSettings(); } }));
+form.addEventListener('change', action(e => {
   if (e.target.id === 'preset' && e.target.value === 'custom') {
     fillCoverSizes();
     const sizeForm = $('#size-form');
@@ -198,23 +210,35 @@ form.addEventListener('change', action(async e => {
     sizeForm.elements.width.select();
     return;
   }
-  await updateSettings();
+  updateSettings();
 }));
+$('#save-settings').onclick = action(async () => {
+  updateSettings();
+  const snapshot = structuredClone(state.settings);
+  settingsSaving = true; updateSaveStatus();
+  try {
+    const saved = await save('settings', snapshot);
+    savedSettings = structuredClone(saved);
+    if (JSON.stringify(state.settings) === JSON.stringify(snapshot)) state.settings = saved;
+    toast('Настройки сохранены.');
+  } finally { settingsSaving = false; updateSaveStatus(); }
+});
 $('#close-size-dialog').onclick = $('#cancel-size').onclick = () => $('#size-dialog').close();
 $('#size-form').oninput = event => {
   const sizeForm = event.currentTarget;
   sizeForm.elements.height.setCustomValidity(Number(sizeForm.elements.width.value) * Number(sizeForm.elements.height.value) > 32_000_000 ? 'Холст не должен превышать 32 мегапикселя' : '');
 };
-$('#size-form').onsubmit = action(async event => {
+$('#size-form').onsubmit = action(event => {
   event.preventDefault();
   const sizeForm = event.currentTarget, button = sizeForm.querySelector('button[type="submit"]'), error = $('#size-error');
   const size = { width: Number(sizeForm.elements.width.value), height: Number(sizeForm.elements.height.value) };
   const coverSizes = state.settings.coverSizes.some(saved => saved.width === size.width && saved.height === size.height) ? state.settings.coverSizes : [...state.settings.coverSizes, size];
-  button.disabled = true; button.textContent = 'Сохраняем…'; error.hidden = true;
+  button.disabled = true; error.hidden = true;
   try {
-    state.settings = await save('settings', { ...readSettings(), ...size, coverSizes });
-    fillCoverSizes(); updateLabels(); draw();
-    $('#size-dialog').close(); toast('Размер обложки сохранён и выбран.');
+    if (coverSizes.length > 100) throw new Error('Можно добавить до 100 размеров обложки');
+    state.settings = { ...readSettings(), ...size, coverSizes };
+    fillCoverSizes(); updateLabels(); draw(); updateSaveStatus();
+    $('#size-dialog').close(); toast('Размер выбран. Нажмите «Сохранить настройки», чтобы сохранить его.');
   } catch (e) { error.textContent = e.message; error.hidden = false; }
   finally { button.disabled = false; button.textContent = 'Добавить и выбрать'; }
 });
@@ -318,10 +342,13 @@ $('#connect-form').onsubmit = action(async event => {
   const candidate = f.elements.token.value.trim();
   button.disabled = true; button.textContent = candidate ? 'Проверяем доступ к VK…' : 'Сохраняем…'; error.hidden = true;
   try {
-    const next = await save('settings', { ...state.settings, community: f.elements.community.value, source: f.elements.source.value });
-    state.settings = next;
+    await saveQueue;
+    const next = await save('settings', { ...savedSettings, community: f.elements.community.value, source: f.elements.source.value });
+    savedSettings = structuredClone(next);
+    state.settings = { ...state.settings, community: next.community, source: next.source };
+    updateSaveStatus();
     if (candidate) { await api('token', { token: candidate }); state.hasToken = true; f.elements.token.value = ''; $('#sync-status').hidden = true; }
-    $('#connect-dialog').close(); renderLibrary(); draw(); toast(candidate ? 'VK подтвердил доступ. Токен сохранён в памяти сервера.' : 'Настройки сохранены.');
+    $('#connect-dialog').close(); renderLibrary(); draw(); toast(candidate ? 'VK подтвердил доступ. Токен сохранён в памяти сервера.' : 'Подключение VK сохранено.');
   } catch (e) { error.textContent = e.message; error.hidden = false; }
   finally { button.disabled = false; button.textContent = 'Сохранить подключение'; }
 });
