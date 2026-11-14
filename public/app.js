@@ -57,8 +57,8 @@ function updateLabels() {
   const preset = `${form.elements.width.value},${form.elements.height.value}`;
   $('#preset').value = ['1920,768', '1590,400'].includes(preset) ? preset : 'custom';
 }
-async function updateSettings(overrides = {}) {
-  const next = { ...readSettings(), ...overrides };
+async function updateSettings() {
+  const next = readSettings();
   await save('settings', next);
   state.settings = next;
   updateLabels(); draw();
@@ -127,7 +127,6 @@ function updateSelection() {
   const item = visibleItems().find(i => i.id === selected);
   $('#selection-controls').hidden = !item;
   $('.selection-title').textContent = item ? 'Выбранный кадр' : 'Выберите кадр на холсте';
-  if (item) { $('#item-width').value = Math.round(item.width); $('#item-angle').value = Math.round(item.angle); }
 }
 function renderLibrary() {
   const excluded = new Set(state.exclusions), pool = state.photos.filter(p => p.source === 'local' || p.community === state.settings.community);
@@ -169,8 +168,7 @@ async function toggleExclusion(id) {
 async function shuffle() {
   if (loading) throw new Error('Дождитесь загрузки изображений');
   if (!available().length) throw new Error('Сначала добавьте фотографии');
-  const seed = (state.settings.seed + 1 + Math.floor(Math.random() * 2147483647)) % 2147483648;
-  await updateSettings({ seed });
+  await updateSettings();
   checkpoint(); items = generate(available(), state.settings); selected = null;
   await loadImages(); draw(); updateSelection(); renderLibrary();
 }
@@ -198,15 +196,11 @@ canvas.onpointerup = endDrag; canvas.onpointercancel = endDrag;
 canvas.addEventListener('wheel', event => {
   const item = items.find(i => i.id === selected); if (!item) return;
   event.preventDefault(); if (!wheelTimer) checkpoint();
-  if (event.shiftKey) item.angle = (item.angle + Math.sign(event.deltaY) * 2) % 360;
+  if (!event.shiftKey) item.angle = (item.angle + Math.sign(event.deltaY) * 2) % 360;
   else item.width = Math.max(10, Math.min(10000, item.width * (event.deltaY > 0 ? .95 : 1.05)));
   draw(); updateSelection(); clearTimeout(wheelTimer); wheelTimer = setTimeout(() => { wheelTimer = null; }, 250);
 }, { passive: false });
 async function editSelected(fn) { const item = items.find(i => i.id === selected); if (!item) return; checkpoint(); fn(item); draw(); updateSelection(); }
-for (const key of ['width', 'angle']) $(`#item-${key}`).onchange = action(event => {
-  if (!event.target.reportValidity()) return;
-  return editSelected(item => item[key] = Number(event.target.value));
-});
 $('#to-front').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); items.push(item); }));
 $('#to-back').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); items.unshift(item); }));
 $('#remove').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); selected = null; }));
@@ -238,7 +232,7 @@ $('#export').onclick = action(async () => {
     }
     const blob = await new Promise(resolve => output.toBlob(resolve, 'image/png'));
     if (!blob) throw new Error('Браузер не смог создать PNG. Попробуйте меньший размер.');
-    const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = `kero-header-${s.seed}-${s.width}x${s.height}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 10000); toast('Обложка готова. PNG передан в загрузки браузера.');
+    const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = `kero-header-${Date.now()}-${s.width}x${s.height}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 10000); toast('Обложка готова. PNG передан в загрузки браузера.');
   } finally { button.disabled = false; button.textContent = 'Скачать PNG ↗'; }
 });
 document.querySelectorAll('.filter').forEach(b => b.onclick = () => { filter = b.dataset.filter; limit = 80; renderLibrary(); });

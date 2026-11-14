@@ -28,12 +28,16 @@ test('network errors explain the cause without exposing request secrets', async 
   assert.match(connectionError(new SyntaxError('private-token')), /JSON/);
 });
 
-test('deterministic generation includes every photo once and respects ranges', () => {
+test('generation uses fresh randomness, supports explicit seeds and respects ranges', t => {
   const photos = Array.from({ length: 120 }, (_, i) => ({ id: `vk_-1_${i}` }));
-  const a = generate(photos, defaults), b = generate([...photos].reverse(), defaults);
+  const a = generate(photos, defaults, 42), b = generate([...photos].reverse(), defaults, 42);
   assert.deepEqual(a, b); assert.equal(new Set(a.map(i => i.id)).size, 120);
   assert.ok(a.every(i => i.width >= defaults.minSize && i.width <= defaults.maxSize && Math.abs(i.angle) <= defaults.rotation));
-  assert.notDeepEqual(a, generate(photos, { ...defaults, seed: 43 }));
+  assert.notDeepEqual(a, generate(photos, defaults, 43));
+  let draw = 0;
+  t.mock.method(Math, 'random', () => ++draw / 4);
+  assert.notDeepEqual(generate(photos, defaults), generate(photos, defaults));
+  t.mock.restoreAll();
   assert.equal(generate(photos, { ...defaults, count: 7 }).length, 7);
   assert.deepEqual(generate([], defaults), []);
 });
@@ -105,7 +109,9 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   assert.equal((await post('/api/import', { name: 'x.svg', data: Buffer.from('<svg></svg>').toString('base64') })).status, 400);
   const { id } = await (await post('/api/import', { name: 'test.png', data: png.toString('base64') })).json();
   assert.match(id, /^local_/); assert.equal((await fetch(base + '/images/' + id)).headers.get('content-type'), 'image/png');
-  await post('/api/settings', { ...defaults, rotation: 50 });
+  const savedSettings = await (await post('/api/settings', { ...defaults, rotation: 50, seed: 42 })).json();
+  assert.equal('seed' in savedSettings, false);
+  assert.equal('seed' in JSON.parse(await readFile(join(root, 'config/settings.json'), 'utf8')), false);
   assert.equal((await post('/api/layout', { items: [{ id, x: 120, y: 80, width: 200, angle: -25 }] })).status, 404);
   await assert.rejects(readFile(join(root, 'config/layout.json')), { code: 'ENOENT' });
   await post('/api/exclusions', [id]);
@@ -124,7 +130,7 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   server.close(); await once(server, 'close'); server = await createApp(root, { vkFactory });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${server.address().port}`;
   state = await (await fetch(base + '/api/state')).json();
-  assert.equal(state.settings.rotation, 50); assert.equal('layout' in state, false); assert.deepEqual(state.exclusions, [id]);
+  assert.equal(state.settings.rotation, 50); assert.equal('seed' in state.settings, false); assert.equal('layout' in state, false); assert.deepEqual(state.exclusions, [id]);
   await writeFile(join(root, 'cache/images/keep.txt'), 'unrelated file');
   assert.equal((await post('/api/cache/clear', {}, { Origin: 'https://evil.example' })).status, 403);
   assert.equal((await (await post('/api/cache/clear', {})).json()).removed, 1);

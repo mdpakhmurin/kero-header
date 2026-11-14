@@ -1,8 +1,8 @@
 export function random(seed) {
   return () => { let t = seed += 0x6D2B79F5; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; };
 }
-export function generate(photos, settings) {
-  const r = random(settings.seed), pool = [...photos].sort((a, b) => a.id.localeCompare(b.id));
+export function generate(photos, settings, seed = Math.floor(Math.random() * 4294967296)) {
+  const r = random(seed), pool = [...photos].sort((a, b) => a.id.localeCompare(b.id));
   for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
   const selected = settings.count ? pool.slice(0, settings.count) : pool;
   const cols = Math.max(1, Math.ceil(Math.sqrt(selected.length * settings.width / settings.height)));
