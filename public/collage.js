@@ -89,3 +89,46 @@ export function hitTest(item, ratio, x, y, border = 0) {
   const a = -item.angle * Math.PI / 180, dx = x - item.x, dy = y - item.y;
   return Math.abs(dx * Math.cos(a) - dy * Math.sin(a)) <= item.width / 2 + border && Math.abs(dx * Math.sin(a) + dy * Math.cos(a)) <= item.width * ratio / 2 + border;
 }
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+export function selectionGeometry(item, ratio, border = 0, scale = 1) {
+  const angle = item.angle * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
+  const halfWidth = item.width / 2 + border, halfHeight = item.width * ratio / 2 + border;
+  const world = (x, y) => ({ x: item.x + x * cos - y * sin, y: item.y + x * sin + y * cos });
+  const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => ({ ...world(sx * halfWidth, sy * halfHeight), sx, sy }));
+  return { corners, top: world(0, -halfHeight), rotate: world(0, -halfHeight - 26 / scale) };
+}
+
+export function selectionHit(geometry, point, scale = 1) {
+  const close = target => Math.hypot(point.x - target.x, point.y - target.y) * scale <= 10;
+  const corner = geometry.corners.find(close);
+  if (corner) return { type: 'resize', ...corner };
+  return close(geometry.rotate) ? { type: 'rotate' } : null;
+}
+
+// Keep the opposite corner fixed and project the dragged corner onto the
+// aspect-ratio diagonal, including the frame around the photograph.
+export function resizeSelection(start, handle, point, ratio, border = 0) {
+  const angle = start.angle * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
+  const anchor = selectionGeometry(start, ratio, border).corners.find(c => c.sx === -handle.sx && c.sy === -handle.sy);
+  const dx = point.x - anchor.x, dy = point.y - anchor.y;
+  const localX = dx * cos + dy * sin, localY = -dx * sin + dy * cos;
+  const width = clamp((handle.sx * localX + ratio * handle.sy * localY - 2 * border * (1 + ratio)) / (1 + ratio * ratio), 10, 10000);
+  const halfX = handle.sx * (width / 2 + border), halfY = handle.sy * (width * ratio / 2 + border);
+  return { width, x: anchor.x + halfX * cos - halfY * sin, y: anchor.y + halfX * sin + halfY * cos };
+}
+
+export function rotateSelection(start, point, pointerAngle, snap = false) {
+  const delta = Math.atan2(point.y - start.y, point.x - start.x) - pointerAngle;
+  let angle = start.angle + delta * 180 / Math.PI;
+  if (snap) angle = Math.round(angle / 15) * 15;
+  return ((angle + 180) % 360 + 360) % 360 - 180;
+}
+
+export function floatingPanelPosition(bounds, panel, area, gap = 12, padding = 10) {
+  const x = clamp((bounds.left + bounds.right - panel.width) / 2, padding, Math.max(padding, area.width - panel.width - padding));
+  let y = bounds.top - panel.height - gap;
+  if (y < padding) y = bounds.bottom + gap;
+  return { x, y: clamp(y, padding, Math.max(padding, area.height - panel.height - padding)) };
+}

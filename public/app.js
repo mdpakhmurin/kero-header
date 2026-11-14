@@ -1,4 +1,4 @@
-import { generate, hitTest } from './collage.js';
+import { generate, hitTest, selectionGeometry, selectionHit, resizeSelection, rotateSelection, floatingPanelPosition } from './collage.js';
 import { photoSource } from './library.js';
 import { createPhotoRenderer, previewDimensions, renderDimensions, smooth } from './render.js';
 import { createHistory } from './history.js';
@@ -7,10 +7,12 @@ import { createPhotoViewer } from './viewer.js';
 const $ = selector => document.querySelector(selector);
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
 const preview = document.createElement('canvas'), photoRenderer = createPhotoRenderer();
+const canvasWrap = $('.canvas-wrap'), selectionPanel = $('#selection-panel'), selectionOutline = $('#selection-outline');
 const history = createHistory();
 const photoViewer = createPhotoViewer($('#photo-viewer'));
 let state, items = [], selected = null, filter = 'active', limit = 80, images = new Map(), drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false, coverageTimer, coverageKey;
 let savedSettings, settingsSaving = false;
+let editingSelection = null;
 const numeric = ['rotation', 'border', 'shadow'];
 const numberInputs = [...form.querySelectorAll('input[data-range]')];
 async function api(path, data) {
@@ -32,7 +34,7 @@ function save(path, value) {
   result.catch(error => report(new Error(`Не удалось сохранить изменения: ${error.message}`)));
   return result;
 }
-function checkpoint() { history.checkpoint(items); $('#undo').disabled = !history.canUndo; $('#redo').disabled = !history.canRedo; }
+function checkpoint() { clearTimeout(wheelTimer); wheelTimer = null; history.checkpoint(items); $('#undo').disabled = !history.canUndo; $('#redo').disabled = !history.canRedo; }
 function available() { return state.photos.filter(p => p.available && !state.exclusions.includes(p.id) && (p.source === 'local' || p.community === state.settings.community)); }
 function visibleItems() { const ids = new Set(available().map(p => p.id)); return items.filter(i => ids.has(i.id)); }
 function readSettings() {
@@ -59,6 +61,7 @@ function updateLabels() {
     const range = form.elements[input.dataset.range];
     input.min = range.min; input.max = range.max; input.step = range.step || '1';
     input.value = range.value;
+    range.style.setProperty('--range-progress', `${(Number(range.value) - Number(range.min)) / (Number(range.max) - Number(range.min)) * 100}%`);
   }
 }
 function fillCoverSizes() {
@@ -76,6 +79,7 @@ function updateSaveStatus() {
   button.disabled = !dirty || settingsSaving;
   button.textContent = settingsSaving ? 'Сохраняем…' : 'Сохранить настройки';
   $('#settings-save-status').textContent = dirty ? 'Есть несохранённые изменения' : 'Все изменения сохранены';
+  $('#settings-save-status').classList.toggle('unsaved', Boolean(dirty));
 }
 function updateSettings() {
   state.settings = readSettings();
@@ -120,22 +124,12 @@ async function refresh() {
   if (fresh.sync.error) { const el = $('#sync-status'); el.hidden = false; el.classList.add('error'); el.textContent = syncMessage(fresh.sync); }
   if (fresh.sync.running) pollSync();
 }
-function paint(context, width, height, drawSelection = false, pixelScale = 1) {
+function paint(context, width, height, pixelScale = 1) {
   const s = state.settings;
   context.clearRect(0, 0, width, height); context.fillStyle = s.background; context.fillRect(0, 0, width, height);
   for (const item of visibleItems()) {
     const image = images.get(item.id); if (!image) continue;
-    const h = item.width * image.height / image.width;
     photoRenderer.draw(context, item, image, s, pixelScale);
-    if (drawSelection && item.id === selected) {
-      const scale = width / canvas.clientWidth;
-      context.save(); context.translate(item.x, item.y); context.rotate(item.angle * Math.PI / 180);
-      context.strokeStyle = '#86a33e'; context.lineWidth = 2 * scale;
-      context.strokeRect(-item.width / 2 - s.border, -h / 2 - s.border, item.width + s.border * 2, h + s.border * 2);
-      context.fillStyle = '#d7f578'; const size = 7 * scale;
-      for (const x of [-item.width / 2 - s.border, item.width / 2 + s.border]) for (const y of [-h / 2 - s.border, h / 2 + s.border]) context.fillRect(x - size / 2, y - size / 2, size, size);
-      context.restore();
-    }
   }
 }
 function draw() {
@@ -149,11 +143,13 @@ function draw() {
   if (preview.height !== renderSize.height) preview.height = renderSize.height;
   const context = smooth(preview.getContext('2d'));
   context.setTransform(preview.width / s.width, 0, 0, preview.height / s.height, 0, 0);
-  paint(context, s.width, s.height, true, preview.width / s.width);
+  paint(context, s.width, s.height, preview.width / s.width);
   ctx.setTransform(1, 0, 0, 1, 0, 0); smooth(ctx);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(preview, 0, 0, canvas.width, canvas.height);
   $('#canvas-count').textContent = visibleItems().length;
+  $('#canvas-empty-state').hidden = visibleItems().length > 0;
+  $('#community-link').href = `https://vk.ru/${encodeURIComponent(s.community)}`;
   $('#dimensions').textContent = `${s.width} × ${s.height}`;
   $('#export').disabled = !visibleItems().length || loading;
   $('#undo').disabled = !history.canUndo;
@@ -167,11 +163,33 @@ function draw() {
       $('#empty-percentage').textContent = empty.toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
     }, 60);
   }
+  updateSelection();
 }
 function updateSelection() {
-  const item = visibleItems().find(i => i.id === selected);
-  $('#selection-controls').hidden = !item;
-  $('.selection-title').textContent = item ? 'Выбранный кадр' : 'Выберите кадр на холсте';
+  const visible = visibleItems(), item = visible.find(i => i.id === selected), image = images.get(selected);
+  selectionPanel.hidden = selectionOutline.hidden = !item || !image;
+  if (!item || !image) { editingSelection = null; return; }
+  const rect = canvas.getBoundingClientRect(), wrap = canvasWrap.getBoundingClientRect();
+  const scale = rect.width / state.settings.width, ratio = image.height / image.width, border = state.settings.border;
+  const origin = { x: rect.left - wrap.left, y: rect.top - wrap.top };
+  Object.assign(selectionOutline.style, {
+    left: `${origin.x + item.x * scale}px`, top: `${origin.y + item.y * scale}px`,
+    width: `${(item.width + border * 2) * scale}px`, height: `${(item.width * ratio + border * 2) * scale}px`,
+    transform: `translate(-50%,-50%) rotate(${item.angle}deg)`,
+  });
+  const geometry = selectionGeometry(item, ratio, border, scale);
+  const bounds = [...geometry.corners, geometry.rotate].map(p => ({ x: origin.x + p.x * scale, y: origin.y + p.y * scale }));
+  const position = floatingPanelPosition({ left: Math.min(...bounds.map(p => p.x)), right: Math.max(...bounds.map(p => p.x)), top: Math.min(...bounds.map(p => p.y)) - 7, bottom: Math.max(...bounds.map(p => p.y)) + 7 }, { width: selectionPanel.offsetWidth, height: selectionPanel.offsetHeight }, { width: canvasWrap.clientWidth, height: canvasWrap.clientHeight });
+  selectionPanel.style.left = `${position.x}px`; selectionPanel.style.top = `${position.y}px`;
+  if (document.activeElement !== $('#selected-width')) $('#selected-width').value = Math.round(item.width);
+  if (document.activeElement !== $('#selected-angle')) $('#selected-angle').value = Math.round((((item.angle + 180) % 360 + 360) % 360 - 180) * 10) / 10;
+  const index = visible.indexOf(item);
+  $('#to-back').disabled = $('#layer-backward').disabled = index === 0;
+  $('#to-front').disabled = $('#layer-forward').disabled = index === visible.length - 1;
+  for (const grip of selectionOutline.querySelectorAll('.selection-grip')) {
+    const angle = item.angle + Math.atan2(Number(grip.dataset.sy), Number(grip.dataset.sx)) * 180 / Math.PI;
+    grip.style.cursor = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][((Math.round(angle / 45) % 4) + 4) % 4];
+  }
 }
 function renderLibrary() {
   const excluded = new Set(state.exclusions), pool = state.photos.filter(p => p.source === 'local' || p.community === state.settings.community);
@@ -181,8 +199,7 @@ function renderLibrary() {
   $('#missing-count').textContent = pool.filter(p => !p.available && !excluded.has(p.id)).length;
   const known = new Set(pool.map(p => p.id));
   const excludedStubs = state.exclusions.filter(id => !known.has(id)).map(id => ({ id, title: id, available: false }));
-  const search = $('#search').value.toLowerCase();
-  const list = [...pool, ...(filter === 'excluded' ? excludedStubs : [])].filter(p => (filter === 'excluded' ? excluded.has(p.id) : filter === 'missing' ? !p.available && !excluded.has(p.id) : p.available && !excluded.has(p.id)) && `${p.title} ${p.id}`.toLowerCase().includes(search));
+  const list = [...pool, ...(filter === 'excluded' ? excludedStubs : [])].filter(p => filter === 'excluded' ? excluded.has(p.id) : filter === 'missing' ? !p.available && !excluded.has(p.id) : p.available && !excluded.has(p.id));
   const grid = $('#library-grid'); grid.replaceChildren();
   for (const photo of list.slice(0, limit)) {
     const card = document.createElement('div'); card.className = `photo-card${excluded.has(photo.id) ? ' excluded' : ''}${selected === photo.id ? ' selected' : ''}`;
@@ -192,17 +209,17 @@ function renderLibrary() {
     preview.title = photo.available ? 'Посмотреть фото' : 'Нет файла в кеше: выполните синхронизацию или импортируйте снова';
     preview.setAttribute('aria-label', `Посмотреть фото: ${photo.title}`);
     preview.onclick = () => photoViewer.open(photo, list);
-    if (photo.available) { const img = document.createElement('img'); img.src = photo.src; img.loading = 'lazy'; img.alt = photo.title; preview.append(img); } else preview.textContent = 'Нет файла';
+    if (photo.available) { const img = document.createElement('img'); img.src = photo.src; img.loading = 'lazy'; img.alt = photo.title; img.draggable = false; preview.append(img); } else preview.textContent = 'Нет файла';
     const choose = document.createElement('button'); choose.className = 'photo-toggle photo-add'; choose.type = 'button'; choose.textContent = '+'; choose.title = 'Выбрать на холсте или добавить в композицию'; choose.setAttribute('aria-label', `${choose.title}: ${photo.title}`); choose.disabled = !photo.available || excluded.has(photo.id);
     choose.onclick = action(async () => {
       if (!items.some(i => i.id === photo.id)) { checkpoint(); items.push({ id: photo.id, x: state.settings.width / 2, y: state.settings.height / 2, width: state.settings.photoSize, angle: 0 }); await loadImages(); }
-      selected = photo.id; draw(); updateSelection(); renderLibrary();
+      selected = photo.id; draw(); updateSelection(); renderLibrary(); canvasWrap.scrollIntoView({ block: 'center' });
     });
     const toggle = document.createElement('button'); toggle.className = 'photo-toggle'; toggle.textContent = excluded.has(photo.id) ? '↶' : '×'; toggle.title = excluded.has(photo.id) ? 'Вернуть в генерацию' : 'Исключить из будущих генераций'; toggle.setAttribute('aria-label', toggle.title); toggle.onclick = action(() => toggleExclusion(photo.id));
     card.append(preview, choose, toggle);
     if (source) {
       const link = document.createElement('a'); link.className = 'photo-toggle photo-source'; link.textContent = '↗';
-      link.href = source.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = source.label;
+      link.href = source.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = source.label; link.draggable = false;
       link.setAttribute('aria-label', `${source.label}: ${photo.title}`); card.append(link);
     }
     grid.append(card);
@@ -287,16 +304,39 @@ $('#size-form').onsubmit = action(event => {
 });
 $('#generate').onclick = action(() => shuffle());
 function point(event) { const rect = canvas.getBoundingClientRect(); return { x: (event.clientX - rect.left) * state.settings.width / rect.width, y: (event.clientY - rect.top) * state.settings.height / rect.height }; }
-canvas.onpointerdown = event => {
-  if (event.button !== 0) return;
-  const p = point(event), item = [...visibleItems()].reverse().find(i => { const image = images.get(i.id); return image && hitTest(i, image.height / image.width, p.x, p.y, state.settings.border); });
+function itemAt(p) {
+  return [...visibleItems()].reverse().find(i => { const image = images.get(i.id); return image && hitTest(i, image.height / image.width, p.x, p.y, state.settings.border); });
+}
+canvasWrap.onpointerdown = event => {
+  if (!event.isPrimary || event.button !== 0 || event.target.closest('.selection')) return;
+  if (selectionPanel.contains(document.activeElement)) document.activeElement.blur();
+  const p = point(event), current = visibleItems().find(i => i.id === selected), image = images.get(selected);
+  const scale = canvas.clientWidth / state.settings.width;
+  const geometry = current && image && selectionGeometry(current, image.height / image.width, state.settings.border, scale);
+  const grip = event.target.closest('.selection-grip');
+  const handle = geometry && (grip ? { type: 'resize', ...geometry.corners.find(c => c.sx === Number(grip.dataset.sx) && c.sy === Number(grip.dataset.sy)) } : event.target.closest('#selection-rotate') ? { type: 'rotate' } : selectionHit(geometry, p, scale));
+  const item = handle ? current : event.target === canvas ? itemAt(p) : null;
   selected = item?.id || null;
-  if (item) { checkpoint(); drag = { item, x: p.x - item.x, y: p.y - item.y }; canvas.setPointerCapture(event.pointerId); }
+  if (item) {
+    event.preventDefault();
+    drag = { item, start: { ...item }, point: p, handle, ratio: images.get(item.id).height / images.get(item.id).width, pointerAngle: Math.atan2(p.y - item.y, p.x - item.x), changed: false };
+    canvasWrap.setPointerCapture(event.pointerId); canvasWrap.classList.add('transforming');
+  }
   draw(); updateSelection(); renderLibrary();
 };
-canvas.onpointermove = event => { if (!drag) return; const p = point(event); drag.item.x = Math.max(-10000, Math.min(20000, p.x - drag.x)); drag.item.y = Math.max(-10000, Math.min(20000, p.y - drag.y)); draw(); };
-const endDrag = () => { drag = null; };
-canvas.onpointerup = endDrag; canvas.onpointercancel = endDrag;
+canvasWrap.onpointermove = event => {
+  const p = point(event);
+  if (!drag) { canvas.style.cursor = itemAt(p) ? 'move' : 'default'; return; }
+  let next;
+  if (drag.handle?.type === 'resize') next = resizeSelection(drag.start, drag.handle, { x: drag.handle.x + p.x - drag.point.x, y: drag.handle.y + p.y - drag.point.y }, drag.ratio, state.settings.border);
+  else if (drag.handle?.type === 'rotate') next = { angle: rotateSelection(drag.start, p, drag.pointerAngle, event.shiftKey) };
+  else next = { x: Math.max(-10000, Math.min(20000, drag.start.x + p.x - drag.point.x)), y: Math.max(-10000, Math.min(20000, drag.start.y + p.y - drag.point.y)) };
+  if (!Object.entries(next).some(([key, value]) => Math.abs(drag.item[key] - value) > .0001)) return;
+  if (!drag.changed) { checkpoint(); drag.changed = true; }
+  Object.assign(drag.item, next); draw();
+};
+const endDrag = () => { drag = null; canvasWrap.classList.remove('transforming'); };
+canvasWrap.onpointerup = canvasWrap.onpointercancel = canvasWrap.onlostpointercapture = endDrag;
 canvas.addEventListener('wheel', event => {
   const item = items.find(i => i.id === selected); if (!item) return;
   event.preventDefault(); if (!wheelTimer) checkpoint();
@@ -305,15 +345,46 @@ canvas.addEventListener('wheel', event => {
   draw(); updateSelection(); clearTimeout(wheelTimer); wheelTimer = setTimeout(() => { wheelTimer = null; }, 250);
 }, { passive: false });
 async function editSelected(fn) { const item = items.find(i => i.id === selected); if (!item) return; checkpoint(); fn(item); draw(); updateSelection(); }
+for (const [id, key] of [['#selected-width', 'width'], ['#selected-angle', 'angle']]) {
+  const input = $(id);
+  input.oninput = () => {
+    const item = visibleItems().find(i => i.id === selected);
+    if (!item || !input.validity.valid || input.value === '') return;
+    const value = Number(input.value); if (item[key] === value) return;
+    if (editingSelection !== input) { checkpoint(); editingSelection = input; }
+    item[key] = value; draw();
+  };
+  input.onblur = () => { editingSelection = null; updateSelection(); };
+  input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); input.blur(); } };
+}
+selectionPanel.addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); selected = null; draw(); renderLibrary(); }
+});
+for (const grip of selectionOutline.querySelectorAll('button')) grip.onkeydown = action(async event => {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault(); event.stopPropagation();
+  const direction = ['ArrowLeft', 'ArrowDown'].includes(event.key) ? -1 : 1;
+  await editSelected(item => {
+    if (grip.id === 'selection-rotate') item.angle = (item.angle + direction * (event.shiftKey ? 15 : 1)) % 360;
+    else item.width = Math.max(10, Math.min(10000, item.width + direction * (event.shiftKey ? 50 : 10)));
+  });
+});
 $('#to-front').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); items.push(item); }));
 $('#to-back').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); items.unshift(item); }));
-$('#remove').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); selected = null; }));
+function stepLayer(item, direction) {
+  const visible = visibleItems(), next = visible[visible.indexOf(item) + direction]; if (!next) return;
+  const from = items.indexOf(item), to = items.indexOf(next);
+  items.splice(from, 1); items.splice(to, 0, item);
+}
+$('#layer-backward').onclick = action(() => editSelected(item => stepLayer(item, -1)));
+$('#layer-forward').onclick = action(() => editSelected(item => stepLayer(item, 1)));
+$('#remove').onclick = action(async () => { await editSelected(item => { items = items.filter(i => i !== item); selected = null; }); renderLibrary(); });
 $('#exclude-selected').onclick = action(() => selected && toggleExclusion(selected));
 async function restoreHistory(direction) {
   if (loading) throw new Error('Дождитесь загрузки изображений');
   const restored = history[direction](items);
   if (!restored) return;
-  clearTimeout(wheelTimer); wheelTimer = null; drag = null;
+  clearTimeout(wheelTimer); wheelTimer = null; endDrag();
   items = restored; selected = null;
   await loadImages(); draw(); updateSelection(); renderLibrary();
 }
@@ -359,11 +430,11 @@ $('#export').onclick = action(async () => {
   } finally {
     if (output && output !== surface) output.width = output.height = 0;
     if (surface) surface.width = surface.height = 0;
-    button.disabled = false; button.textContent = 'Скачать PNG ↗';
+    button.disabled = false; button.textContent = 'Экспорт PNG';
   }
 });
 document.querySelectorAll('.filter').forEach(b => b.onclick = () => { filter = b.dataset.filter; limit = 80; renderLibrary(); });
-$('#search').oninput = () => { limit = 80; renderLibrary(); }; $('#load-more').onclick = () => { limit += 80; renderLibrary(); };
+$('#load-more').onclick = () => { limit += 80; renderLibrary(); };
 $('#import').onclick = () => $('#file-input').click();
 $('#clear-cache').onclick = action(async () => {
   if (loading) throw new Error('Дождитесь загрузки изображений');
