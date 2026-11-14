@@ -3,13 +3,13 @@
   "source": "both",
   "width": 1920,
   "height": 768,
-  "minSize": 180,
-  "maxSize": 440,
-  "rotation": 44,
+  "minSize": 295,
+  "maxSize": 295,
+  "rotation": 63,
   "scatter": 100,
   "count": 0,
-  "seed": 819779399,
-  "background": "#f0eadf",
-  "border": 7,
-  "shadow": 24
+  "seed": 892535063,
+  "background": "#e3e1de",
+  "border": 4,
+  "shadow": 33
 }
