@@ -1,12 +1,14 @@
 import { generate, hitTest } from './collage.js';
 import { photoSource } from './library.js';
 import { createPhotoRenderer, previewDimensions, renderDimensions, smooth } from './render.js';
+import { createHistory } from './history.js';
+import { emptySpacePercent } from './coverage.js';
 const $ = selector => document.querySelector(selector);
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
 const preview = document.createElement('canvas'), photoRenderer = createPhotoRenderer();
-let state, items = [], selected = null, filter = 'active', limit = 80, images = new Map(), undo = [], drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false;
+const history = createHistory();
+let state, items = [], selected = null, filter = 'active', limit = 80, images = new Map(), drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false, coverageTimer, coverageKey;
 let savedSettings, settingsSaving = false;
-let photoSizeEditDeviation = null;
 const numeric = ['rotation', 'border', 'shadow'];
 const numberInputs = [...form.querySelectorAll('input[data-range]')];
 async function api(path, data) {
@@ -28,34 +30,29 @@ function save(path, value) {
   result.catch(error => report(new Error(`Не удалось сохранить изменения: ${error.message}`)));
   return result;
 }
-function checkpoint() { undo.push(structuredClone(items)); if (undo.length > 50) undo.shift(); $('#undo').disabled = false; }
+function checkpoint() { history.checkpoint(items); $('#undo').disabled = !history.canUndo; $('#redo').disabled = !history.canRedo; }
 function available() { return state.photos.filter(p => p.available && !state.exclusions.includes(p.id) && (p.source === 'local' || p.community === state.settings.community)); }
 function visibleItems() { const ids = new Set(available().map(p => p.id)); return items.filter(i => ids.has(i.id)); }
 function readSettings() {
   const next = { ...state.settings };
   [next.width, next.height] = $('#preset').value.split(',').map(Number);
   for (const name of numeric) next[name] = Number(form.elements[name].value);
-  const size = Number(form.elements.photoSize.value), deviation = Number(form.elements.sizeDeviation.value);
-  next.minSize = size - deviation;
-  next.maxSize = size + deviation;
+  next.photoSize = Number(form.elements.photoSize.value);
+  next.sizeDeviation = Number(form.elements.sizeDeviation.value);
   next.count = 0;
   next.background = form.elements.background.value;
   if (!form.reportValidity()) throw new Error('Проверьте параметры композиции');
-  if (next.minSize > next.maxSize) throw new Error('Минимальный размер должен быть не больше максимального');
   if (next.width * next.height > 32_000_000) throw new Error('Холст не должен превышать 32 мегапикселя');
   return next;
 }
 function fillForm() {
   fillCoverSizes();
   for (const [name, value] of Object.entries(state.settings)) if (form.elements[name]) form.elements[name].value = value;
-  form.elements.photoSize.value = Math.round((state.settings.minSize + state.settings.maxSize) / 2);
-  form.elements.sizeDeviation.max = 1990;
-  form.elements.sizeDeviation.value = Math.round((state.settings.maxSize - state.settings.minSize) / 2);
+  form.elements.photoSize.value = state.settings.photoSize;
+  form.elements.sizeDeviation.value = state.settings.sizeDeviation;
   updateLabels();
 }
 function updateLabels() {
-  const size = Number(form.elements.photoSize.value);
-  form.elements.sizeDeviation.max = Math.min(size - 20, 4000 - size);
   for (const input of numberInputs) {
     const range = form.elements[input.dataset.range];
     input.min = range.min; input.max = range.max; input.step = range.step || '1';
@@ -157,7 +154,17 @@ function draw() {
   $('#canvas-count').textContent = visibleItems().length;
   $('#dimensions').textContent = `${s.width} × ${s.height}`;
   $('#export').disabled = !visibleItems().length || loading;
-  $('#undo').disabled = !undo.length;
+  $('#undo').disabled = !history.canUndo;
+  $('#redo').disabled = !history.canRedo;
+  const visible = visibleItems();
+  const key = JSON.stringify([s.width, s.height, s.border, visible.map(item => [item.id, item.x, item.y, item.width, item.angle, images.get(item.id)?.width, images.get(item.id)?.height])]);
+  if (key !== coverageKey) {
+    coverageKey = key; clearTimeout(coverageTimer);
+    coverageTimer = setTimeout(() => {
+      const empty = emptySpacePercent(visible, images, s);
+      $('#empty-percentage').textContent = empty.toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    }, 60);
+  }
 }
 function updateSelection() {
   const item = visibleItems().find(i => i.id === selected);
@@ -184,7 +191,7 @@ function renderLibrary() {
     if (photo.available) { const img = document.createElement('img'); img.src = photo.src; img.loading = 'lazy'; img.alt = photo.title; preview.append(img); } else preview.textContent = 'Нет файла';
     const choose = document.createElement('button'); choose.className = 'photo-toggle photo-add'; choose.type = 'button'; choose.textContent = '+'; choose.title = 'Выбрать на холсте или добавить в композицию'; choose.setAttribute('aria-label', `${choose.title}: ${photo.title}`); choose.disabled = !photo.available || excluded.has(photo.id);
     choose.onclick = action(async () => {
-      if (!items.some(i => i.id === photo.id)) { checkpoint(); items.push({ id: photo.id, x: state.settings.width / 2, y: state.settings.height / 2, width: state.settings.maxSize, angle: 0 }); await loadImages(); }
+      if (!items.some(i => i.id === photo.id)) { checkpoint(); items.push({ id: photo.id, x: state.settings.width / 2, y: state.settings.height / 2, width: state.settings.photoSize, angle: 0 }); await loadImages(); }
       selected = photo.id; draw(); updateSelection(); renderLibrary();
     });
     const toggle = document.createElement('button'); toggle.className = 'photo-toggle'; toggle.textContent = excluded.has(photo.id) ? '↶' : '×'; toggle.title = excluded.has(photo.id) ? 'Вернуть в генерацию' : 'Исключить из будущих генераций'; toggle.setAttribute('aria-label', toggle.title); toggle.onclick = action(() => toggleExclusion(photo.id));
@@ -216,23 +223,12 @@ async function shuffle() {
   draw(); updateSelection(); renderLibrary();
 }
 form.addEventListener('submit', e => e.preventDefault());
-form.addEventListener('focusin', event => {
-  if (event.target.dataset.range === 'photoSize') photoSizeEditDeviation = Number(form.elements.sizeDeviation.value);
-});
-form.addEventListener('focusout', event => {
-  if (event.target.dataset.range === 'photoSize') photoSizeEditDeviation = null;
-});
 form.addEventListener('input', action(event => {
   const input = event.target;
   if (input.id === 'preset') return;
   if (input.dataset.range) {
     if (!input.validity.valid) return;
     form.elements[input.dataset.range].value = input.value;
-    if (input.dataset.range === 'photoSize' && photoSizeEditDeviation !== null) {
-      const deviation = form.elements.sizeDeviation, size = Number(input.value);
-      deviation.max = Math.min(size - 20, 4000 - size);
-      deviation.value = Math.min(photoSizeEditDeviation, Number(deviation.max));
-    }
   }
   updateLabels(); updateSettings();
 }));
@@ -305,10 +301,23 @@ $('#to-front').onclick = action(() => editSelected(item => { items = items.filte
 $('#to-back').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); items.unshift(item); }));
 $('#remove').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); selected = null; }));
 $('#exclude-selected').onclick = action(() => selected && toggleExclusion(selected));
-$('#undo').onclick = action(async () => { if (!undo.length) return; items = undo.pop(); selected = null; await loadImages(); draw(); updateSelection(); });
+async function restoreHistory(direction) {
+  if (loading) throw new Error('Дождитесь загрузки изображений');
+  const restored = history[direction](items);
+  if (!restored) return;
+  clearTimeout(wheelTimer); wheelTimer = null; drag = null;
+  items = restored; selected = null;
+  await loadImages(); draw(); updateSelection(); renderLibrary();
+}
+$('#undo').onclick = action(() => restoreHistory('undo'));
+$('#redo').onclick = action(() => restoreHistory('redo'));
 window.addEventListener('keydown', event => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName) || $('#connect-dialog').open || $('#size-dialog').open) return;
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); $('#undo').click(); }
+  if (event.ctrlKey || event.metaKey) {
+    const key = event.key.toLowerCase();
+    if (key === 'y' || key === 'z' && event.shiftKey) { event.preventDefault(); $('#redo').click(); }
+    else if (key === 'z') { event.preventDefault(); $('#undo').click(); }
+  }
   if (event.key === 'Delete' && selected) { event.preventDefault(); $('#remove').click(); }
   if (event.key === 'Escape') { selected = null; draw(); updateSelection(); }
 });
@@ -348,6 +357,11 @@ $('#export').onclick = action(async () => {
 document.querySelectorAll('.filter').forEach(b => b.onclick = () => { filter = b.dataset.filter; limit = 80; renderLibrary(); });
 $('#search').oninput = () => { limit = 80; renderLibrary(); }; $('#load-more').onclick = () => { limit += 80; renderLibrary(); };
 $('#import').onclick = () => $('#file-input').click();
+$('#open-images-folder').onclick = action(async () => {
+  const button = $('#open-images-folder'); button.disabled = true;
+  try { await api('images/open-folder', {}); }
+  finally { button.disabled = false; }
+});
 $('#clear-cache').onclick = action(async () => {
   if (loading) throw new Error('Дождитесь загрузки изображений');
   if (!confirm('Удалить все изображения из локального кеша? Фото VK можно скачать повторно синхронизацией. Файлы, добавленные с компьютера, потребуется импортировать снова. Настройки и исключения сохранятся.')) return;
@@ -355,7 +369,7 @@ $('#clear-cache').onclick = action(async () => {
   try {
     await saveQueue;
     const result = await api('cache/clear', {});
-    items = []; undo = []; selected = null; drag = null;
+    items = []; history.clear(); selected = null; drag = null;
     for (const bitmap of images.values()) { photoRenderer.release(bitmap); bitmap.close(); } images.clear();
     await refresh();
     toast(`Кеш очищен. Удалено файлов: ${result.removed}.`);

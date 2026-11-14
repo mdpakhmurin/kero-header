@@ -1,17 +1,19 @@
 import http from 'node:http';
-import { readFile, stat, readdir, unlink } from 'node:fs/promises';
+import { readFile, stat, readdir, unlink, mkdir } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaults, readJSON, writeJSON, validateSettings, validId, digest, saveImage } from './lib/storage.mjs';
+import { defaults, readJSON, writeJSON, validateSettings, validId, digest, saveImage, imagePath, readImage, migrateImageFiles } from './lib/storage.mjs';
 import { syncLibrary, createVK } from './lib/vk.mjs';
+import { openFolder } from './lib/folder.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 try { process.loadEnvFile(join(here, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 
-export async function createApp(root = here, { vkFactory = createVK } = {}) {
+export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder } = {}) {
   let settings = validateSettings(await readJSON(join(root, 'config/settings.json'), defaults));
   let exclusions = await readJSON(join(root, 'config/exclusions.json'), []);
   let library = await readJSON(join(root, 'cache/library.json'), { photos: {}, lastSync: null });
+  await migrateImageFiles(root, library);
   let token = process.env.VK_TOKEN || '';
   let sync = { running: false, message: '', warnings: [] };
   let mutation = Promise.resolve();
@@ -26,7 +28,7 @@ export async function createApp(root = here, { vkFactory = createVK } = {}) {
     if (req.method === 'GET' && path === '/api/state') {
       const photos = await Promise.all(Object.values(library.photos).map(async p => {
         let available = false;
-        try { available = (await stat(join(root, 'cache/images', `${p.id}.img`))).size > 0; } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        try { available = (await stat(imagePath(root, p))).size > 0; } catch (e) { if (e.code !== 'ENOENT') throw e; }
         const { url, hash, ...publicPhoto } = p;
         return { ...publicPhoto, available, src: `/images/${p.id}` };
       }));
@@ -36,13 +38,20 @@ export async function createApp(root = here, { vkFactory = createVK } = {}) {
     if (req.method !== 'POST') return json(res, 404, { error: 'Не найдено' });
     const input = await body(req);
     if (path === '/api/settings') { const next = validateSettings(input); await writeJSON(join(root, 'config/settings.json'), next); settings = next; return json(res, 200, settings); }
+    if (path === '/api/images/open-folder') {
+      const directory = join(root, 'cache/images');
+      await mkdir(directory, { recursive: true });
+      await folderOpener(directory);
+      return json(res, 200, { opened: true });
+    }
     if (path === '/api/cache/clear') {
       if (sync.running) return json(res, 409, { error: 'Дождитесь окончания синхронизации перед очисткой кеша' });
       const directory = join(root, 'cache/images');
       const files = await readdir(directory, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
       let removed = 0;
       for (const file of files) {
-        if ((!file.isFile() && !file.isSymbolicLink()) || !file.name.endsWith('.img') || !validId(file.name.slice(0, -4))) continue;
+        const match = /^(.*)\.(?:img|png|jpg|webp)$/.exec(file.name);
+        if ((!file.isFile() && !file.isSymbolicLink()) || !match || !validId(match[1])) continue;
         try { await unlink(join(directory, file.name)); removed++; }
         catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
@@ -101,10 +110,10 @@ export async function createApp(root = here, { vkFactory = createVK } = {}) {
       if (path.startsWith('/images/')) {
         const id = path.slice(8);
         if (!validId(id) || !library.photos[id]) return json(res, 404, { error: 'Фото не найдено' });
-        const data = await readFile(join(root, 'cache/images', `${id}.img`));
+        const data = await readImage(root, library.photos[id]);
         res.writeHead(200, { 'Content-Type': library.photos[id].mime || 'application/octet-stream', 'Cache-Control': 'no-cache' }); res.end(data); return;
       }
-      const routes = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/comic.css': ['comic.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'], '/library.js': ['library.js', 'text/javascript'], '/render.js': ['render.js', 'text/javascript'] };
+      const routes = { '/': ['index.html', 'text/html'], '/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/comic.css': ['comic.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'], '/library.js': ['library.js', 'text/javascript'], '/render.js': ['render.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/history.js': ['history.js', 'text/javascript'], '/coverage.js': ['coverage.js', 'text/javascript'] };
       if (!routes[path]) return json(res, 404, { error: 'Не найдено' });
       const [file, type] = routes[path];
       res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-cache' }); res.end(await readFile(join(here, 'public', file)));

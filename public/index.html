@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ru">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ке’Ро — мастерская обложек</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/comic.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ке’Ро — мастерская обложек</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/comic.css"></head>
 <body>
   <main>
     <div class="workspace">
@@ -9,7 +9,7 @@
           <label class="field-label">Размер обложки <select id="preset"><option value="1920,768">1920 × 768</option><option value="1590,400">1590 × 400</option><option value="custom">＋ Добавить размер…</option></select></label>
           <div class="divider"></div>
           <div class="range-label"><label for="photo-size-slider">Размер фотографий</label><span class="range-value"><input id="photo-size-out" type="number" data-range="photoSize" min="20" max="800" step="1" required aria-label="Размер фотографий, px"><span>px</span></span><input id="photo-size-slider" name="photoSize" type="range" min="20" max="800" step="1"></div>
-          <div class="range-label"><label for="size-deviation-slider">Случайное отклонение размера</label><span class="range-value"><span>±</span><input id="size-deviation-out" type="number" data-range="sizeDeviation" min="0" max="1990" step="1" required aria-label="Случайное отклонение размера, px"><span>px</span></span><input id="size-deviation-slider" name="sizeDeviation" type="range" min="0" max="1990" step="1"></div>
+          <div class="range-label"><label for="size-deviation-slider">Отклонение размера</label><span class="range-value"><span>±</span><input id="size-deviation-out" type="number" data-range="sizeDeviation" min="0" max="300" step="1" required aria-label="Отклонение размера, проценты"><span>%</span></span><input id="size-deviation-slider" name="sizeDeviation" type="range" min="0" max="300" step="1"></div>
           <div class="range-label"><label for="rotation-slider">Вращение</label><span class="range-value"><span>±</span><input id="rotation-out" type="number" data-range="rotation" min="0" max="180" step="1" required aria-label="Вращение, градусы"><span>°</span></span><input id="rotation-slider" name="rotation" type="range" min="0" max="180" step="1"></div>
           <div class="divider"></div>
           <div class="range-label"><label for="border-slider">Рамка</label><span class="range-value"><input id="border-out" type="number" data-range="border" min="0" max="60" step="1" required aria-label="Рамка, px"><span>px</span></span><input id="border-slider" name="border" type="range" min="0" max="60" step="1"></div>
@@ -20,15 +20,15 @@
         <div class="settings-save"><button id="save-settings" type="button" class="button light full" disabled>Сохранить настройки</button><small id="settings-save-status" role="status">Все изменения сохранены</small></div>
       </aside>
       <section class="editor-area">
-        <div class="panel editor"><div class="editor-top"><div class="tabs"><span class="active">Обложка</span><span id="dimensions">1920 × 768</span></div><div class="editor-actions"><button id="export" class="button dark small">Скачать PNG ↗</button><button id="undo" class="icon-button" title="Отменить (Ctrl+Z)" aria-label="Отменить">↶</button></div></div>
+        <div class="panel editor"><div class="editor-top"><div class="tabs"><span class="active">Обложка</span><span id="dimensions">1920 × 768</span></div><div class="editor-actions"><button id="export" class="button dark small">Скачать PNG ↗</button><button id="undo" class="icon-button" title="Отменить (Ctrl+Z)" aria-label="Отменить" disabled>↶</button><button id="redo" class="icon-button" title="Повторить (Ctrl+Shift+Z / Ctrl+Y)" aria-label="Повторить" disabled>↷</button></div></div>
           <div class="canvas-wrap"><canvas id="canvas" width="1920" height="768" aria-label="Редактор коллажа. Выбирайте фото мышью или в библиотеке."></canvas></div>
-          <div class="editor-bottom"><span><span class="dot"></span> <b id="canvas-count">0</b> кадров на холсте</span><span>Перетаскивайте фото · Колесо — поворот · Shift + колесо — размер</span></div>
+          <div class="editor-bottom"><span><span class="dot"></span> <b id="canvas-count">0</b> кадров на холсте</span><span id="coverage-status" title="Примерная доля холста, не закрытая фото и рамками. Тени не учитываются.">Пусто: ≈ <b id="empty-percentage">100,0</b>%</span><span>Перетаскивайте фото · Колесо — поворот · Shift + колесо — размер</span></div>
         </div>
         <div id="selection-panel" class="panel selection"><span class="selection-title">Выберите кадр на холсте</span><div id="selection-controls" hidden><button id="to-back" class="button light small">На задний план</button><button id="to-front" class="button light small">На передний</button><button id="remove" class="button light small">Убрать с холста</button><button id="exclude-selected" class="button danger small">Исключить навсегда</button></div></div>
         <section class="panel library"><div class="library-top"><div><h2>Все в кадре <span id="library-count">0</span></h2></div><div class="library-actions"><button id="import" class="button light">＋ Добавить файлы</button><div class="sync-button-group" role="group" aria-label="Синхронизация и настройки VK"><button id="sync" class="button dark">⟳ Синхронизировать VK</button><button id="sync-settings" class="button dark" type="button" title="Настройки VK" aria-label="Настройки VK">⚙</button></div></div></div>
           <div class="library-filters"><div class="filter-buttons"><button class="filter active" data-filter="active">Доступные <b id="active-count">0</b></button><button class="filter" data-filter="excluded">Исключённые <b id="excluded-count">0</b></button><button class="filter" data-filter="missing">Нет в кеше <b id="missing-count">0</b></button></div><input id="search" type="search" placeholder="Найти кадр…" aria-label="Найти кадр"></div>
           <div id="sync-status" class="sync-status" role="status" hidden></div><div id="library-grid" class="library-grid"></div><div id="library-empty" class="library-empty">Здесь будет ваша коллекция. Изображения сохраняются на компьютере и не скачиваются повторно.</div><button id="load-more" class="text-button full" hidden>Показать ещё 80</button>
-          <div class="library-footer"><button id="clear-cache" class="button light small" type="button">Очистить кеш</button></div>
+          <div class="library-footer"><button id="open-images-folder" class="button light small" type="button">Открыть папку с фото</button><button id="clear-cache" class="button light small" type="button">Очистить кеш</button></div>
         </section>
       </section>
     </div>

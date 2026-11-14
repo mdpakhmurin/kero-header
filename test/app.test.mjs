@@ -9,6 +9,7 @@ import { syncLibrary, paginate, wallPhotos, createVK, connectionError } from '..
 import { createApp } from '../server.mjs';
 import { generate, hitTest } from '../public/collage.js';
 import { photoSource } from '../public/library.js';
+import { photoSizeRange } from '../public/settings.js';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64');
 async function fixture(t) { const root = await mkdtemp(join(tmpdir(), 'kero-test-')); t.after(() => rm(root, { recursive: true, force: true })); return root; }
@@ -33,7 +34,8 @@ test('generation uses fresh randomness, supports explicit seeds and respects ran
   const photos = Array.from({ length: 120 }, (_, i) => ({ id: `vk_-1_${i}` }));
   const a = generate(photos, defaults, 42), b = generate([...photos].reverse(), defaults, 42);
   assert.deepEqual(a, b); assert.equal(new Set(a.map(i => i.id)).size, 120);
-  assert.ok(a.every(i => i.width >= defaults.minSize && i.width <= defaults.maxSize && Math.abs(i.angle) <= defaults.rotation));
+  const range = photoSizeRange(defaults);
+  assert.ok(a.every(i => i.width >= range.minSize && i.width <= range.maxSize && Math.abs(i.angle) <= defaults.rotation));
   assert.notDeepEqual(a, generate(photos, defaults, 43));
   let draw = 0;
   t.mock.method(Math, 'random', () => ++draw / 4);
@@ -48,7 +50,8 @@ test('hit testing respects rotation and image aspect ratio', () => {
 });
 test('settings and layout reject invalid dimensions and path-like IDs', () => {
   assert.throws(() => validateSettings({ ...defaults, width: 8192, height: 8192 }));
-  assert.throws(() => validateSettings({ ...defaults, minSize: 999 }));
+  assert.throws(() => validateSettings({ ...defaults, photoSize: 999 }));
+  assert.throws(() => validateSettings({ ...defaults, sizeDeviation: 301 }));
   assert.throws(() => validateLayout({ items: [{ id: '../../.env', x: 1, y: 1, width: 100, angle: 0 }] }));
   assert.equal(validateSettings({ ...defaults, community: 'https://vk.ru/kero_comics' }).community, 'kero_comics');
   assert.equal('scatter' in validateSettings({ ...defaults, scatter: 100 }), false);
@@ -72,20 +75,24 @@ test('pagination continues across pages; repost attachments are included', async
   assert.equal(wallPhotos({ attachments: [{ type: 'photo', photo: photo(1) }], copy_history: [{ attachments: [{ type: 'photo', photo: photo(2) }] }] }).length, 2);
   await assert.rejects(paginate(async () => ({ count: 5, items: [] }), 'wall.get', {}, 100, () => {}));
 });
-test('sync deduplicates, reuses cache, repairs missing/corrupt files and skips exclusions', async t => {
+test('sync downloads and repairs excluded photos as well as active photos', async t => {
   const root = await fixture(t), library = { photos: {} }; let downloads = 0;
   const call = async method => method === 'utils.resolveScreenName' ? { type: 'group', object_id: 123 } : method === 'photos.getAll' ? { count: 2, items: [photo(1), photo(2)] } : { count: 1, items: [{ attachments: [{ type: 'photo', photo: photo(1) }] }] };
   const run = async exclusions => { const s = status(); await syncLibrary({ root, settings: defaults, library, exclusions, status: s, call, download: async () => { downloads++; return png; } }); return s; };
-  assert.equal((await run([])).downloaded, 2); assert.equal(downloads, 2);
+  assert.equal((await run(['vk_-123_2'])).downloaded, 2); assert.equal(downloads, 2);
   assert.equal((await run([])).cached, 2); assert.equal(downloads, 2);
-  await unlink(join(root, 'cache/images/vk_-123_1.img'));
+  await unlink(join(root, 'cache/images/vk_-123_1.png'));
   assert.equal((await run([])).downloaded, 1); assert.equal(downloads, 3);
-  await writeFile(join(root, 'cache/images/vk_-123_1.img'), 'broken');
+  await writeFile(join(root, 'cache/images/vk_-123_1.png'), 'broken');
   assert.equal((await run([])).downloaded, 1); assert.equal(downloads, 4);
-  await unlink(join(root, 'cache/images/vk_-123_2.img'));
-  assert.equal((await run(['vk_-123_2'])).skipped, 1); assert.equal(downloads, 4);
+  await unlink(join(root, 'cache/images/vk_-123_2.png'));
+  assert.equal((await run(['vk_-123_2'])).downloaded, 1); assert.equal(downloads, 5);
   assert.ok(await cacheValid(root, library.photos['vk_-123_1']));
-  assert.equal((await run([])).downloaded, 1);
+  assert.ok(await cacheValid(root, library.photos['vk_-123_2']));
+  assert.equal((await run([])).downloaded, 0);
+  library.photos['vk_-123_3'] = { ...library.photos['vk_-123_2'], id: 'vk_-123_3', url: 'https://example.com/3.png' };
+  assert.equal((await run(['vk_-123_3'])).downloaded, 1);
+  assert.ok(await cacheValid(root, library.photos['vk_-123_3']));
 });
 test('partial VK access retains photos and reports warnings', async t => {
   const root = await fixture(t), s = status(), library = { photos: {} };
@@ -146,7 +153,8 @@ test('HTTP import, persistence, missing-file detection and local-only protection
     if (candidate !== 'test-secret') throw new Error('VK: ошибка 5. Test authorization denied');
     return { type: 'group', object_id: 123 };
   };
-  let server = await createApp(root, { vkFactory });
+  const openedFolders = [], folderOpener = async directory => openedFolders.push(directory);
+  let server = await createApp(root, { vkFactory, folderOpener });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
   let base = `http://127.0.0.1:${server.address().port}`;
@@ -154,6 +162,12 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   assert.equal((await fetch(base)).status, 200);
   assert.equal((await fetch(base + '/library.js')).status, 200);
   assert.equal((await fetch(base + '/render.js')).status, 200);
+  for (const route of ['/settings.js', '/history.js', '/coverage.js', '/favicon.svg']) assert.equal((await fetch(base + route)).status, 200);
+  assert.match((await fetch(base + '/favicon.svg')).headers.get('content-type'), /image\/svg\+xml/);
+  assert.equal((await post('/api/images/open-folder', {}, { Origin: 'https://evil.example' })).status, 403);
+  assert.equal(openedFolders.length, 0);
+  assert.deepEqual(await (await post('/api/images/open-folder', { path: 'C:/unrelated' })).json(), { opened: true });
+  assert.deepEqual(openedFolders, [join(root, 'cache/images')]);
   assert.equal((await post('/api/settings', defaults, { Origin: 'https://evil.example' })).status, 403);
   assert.equal((await fetch(base + '/.env')).status, 404);
   assert.equal((await post('/api/import', { name: 'x.svg', data: Buffer.from('<svg></svg>').toString('base64') })).status, 400);

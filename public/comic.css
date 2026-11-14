@@ -19,3 +19,5 @@ main{max-width:1700px;padding:30px 42px 0}.intro{margin:0 0 30px;min-height:126p
 .settings-save{display:grid;gap:9px;margin-top:12px}.settings-save small{font-size:10px;line-height:1.5;text-align:center;color:#60666a}
 
 #settings-form .range-value{display:flex;align-items:center;justify-content:flex-end;gap:3px;white-space:nowrap;font-size:10px;color:#596168}#settings-form .range-value input{width:65px;min-width:0;padding:4px 5px;font-size:11px;text-align:right;background:#fffef5;border:1px solid #8f999f;border-radius:2px}#settings-form .range-label>label{min-width:0}
+
+#coverage-status{white-space:nowrap;color:#41494e}.editor-bottom{flex-wrap:wrap}.library-footer{flex-wrap:wrap}

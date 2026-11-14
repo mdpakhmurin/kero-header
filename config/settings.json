@@ -13,8 +13,8 @@
       "height": 400
     }
   ],
-  "minSize": 211,
-  "maxSize": 211,
+  "photoSize": 211,
+  "sizeDeviation": 0,
   "rotation": 38,
   "count": 0,
   "background": "#e3e1de",

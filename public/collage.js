@@ -1,3 +1,5 @@
+import { photoSizeRange } from './settings.js';
+
 export function random(seed) {
   return () => { let t = seed += 0x6D2B79F5; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; };
 }
@@ -7,6 +9,7 @@ export function generate(photos, settings, seed = Math.floor(Math.random() * 429
   const selected = settings.count ? pool.slice(0, settings.count) : pool;
   if (!selected.length) return [];
   const width = settings.width, height = settings.height, border = settings.border || 0;
+  const { minSize, maxSize } = photoSizeRange(settings);
   // Include the canvas edges in the coverage map, not just interior samples.
   // The bounded resolution keeps placement practical for large photo libraries.
   const cell = Math.max(1, Math.sqrt(width * height / 12000));
@@ -16,7 +19,7 @@ export function generate(photos, settings, seed = Math.floor(Math.random() * 429
   const holePositions = Int32Array.from(holes);
   const frames = selected.map(photo => {
     const ratio = photo.height / photo.width;
-    const item = { id: photo.id, x: 0, y: 0, width: Math.round(settings.minSize + r() * (settings.maxSize - settings.minSize)), angle: Math.round((r() * 2 - 1) * settings.rotation) };
+    const item = { id: photo.id, x: 0, y: 0, width: Math.round(minSize + r() * (maxSize - minSize)), angle: Math.round((r() * 2 - 1) * settings.rotation) };
     const halfW = item.width / 2 + border, halfH = item.width * (Number.isFinite(ratio) && ratio > 0 ? ratio : 1) / 2 + border;
     const angle = item.angle * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
     return { item, halfW, halfH, cos, sin, extentX: Math.abs(halfW * cos) + Math.abs(halfH * sin), extentY: Math.abs(halfW * sin) + Math.abs(halfH * cos) };
