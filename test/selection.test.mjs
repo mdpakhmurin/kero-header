@@ -1,7 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { selectionGeometry, selectionHit, resizeSelection, rotateSelection, floatingPanelPosition } from '../public/collage.js';
+import { selectionGeometry, selectionHit, resizeSelection, rotateSelection, floatingPanelPosition, manualFrames } from '../public/collage.js';
+import { createHistory } from '../public/history.js';
 const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-8, `${actual} != ${expected}`);
+
+test('bulk add creates independent copies, preserves existing frames and undoes as one action', () => {
+  const existing = [{ id: 'same', instanceId: 'old', x: 20, y: 20, width: 30, angle: 15 }];
+  const before = structuredClone(existing), history = createHistory(); let sequence = 0;
+  const frames = manualFrames([{ id: 'same' }, { id: 'another' }, { id: 'same' }], { width: 100, height: 100, photoSize: 45 }, existing, () => `new-${++sequence}`);
+  assert.deepEqual(existing, before);
+  assert.equal(new Set(frames.map(item => item.instanceId)).size, 3);
+  assert.deepEqual(frames.map(item => item.id), ['same', 'another', 'same']);
+  assert.ok(frames.every(item => item.x >= 10 && item.x <= 90 && item.y >= 10 && item.y <= 90 && item.width === 45));
+  history.checkpoint(existing); const after = [...existing, ...frames];
+  assert.deepEqual(history.undo(after), before);
+  assert.deepEqual(history.redo(before), after);
+});
 
 test('resize preserves the opposite corner and aspect ratio at every rotation', () => {
   for (const angle of [0, 37, 90, -150]) for (const ratio of [.5, 1, 2]) {

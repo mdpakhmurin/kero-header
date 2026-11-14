@@ -1,3 +1,10 @@
+export function historyShortcut(event) {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.isComposing) return null;
+  const key = event.code || `Key${String(event.key).toUpperCase()}`;
+  if (key === 'KeyY' || key === 'KeyZ' && event.shiftKey) return 'redo';
+  return key === 'KeyZ' ? 'undo' : null;
+}
+
 export function createHistory(limit = 50) {
   const past = [], future = [];
   return {

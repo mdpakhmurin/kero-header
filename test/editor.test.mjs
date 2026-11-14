@@ -1,6 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHistory } from '../public/history.js';
+import { createHistory, historyShortcut } from '../public/history.js';
+
+test('undo shortcuts work with Russian layouts and both redo combinations', () => {
+  assert.equal(historyShortcut({ ctrlKey: true, code: 'KeyZ', key: 'я' }), 'undo');
+  assert.equal(historyShortcut({ ctrlKey: true, shiftKey: true, code: 'KeyZ', key: 'Я' }), 'redo');
+  assert.equal(historyShortcut({ ctrlKey: true, code: 'KeyY', key: 'н' }), 'redo');
+  assert.equal(historyShortcut({ metaKey: true, code: 'KeyZ' }), 'undo');
+  assert.equal(historyShortcut({ ctrlKey: true, key: 'z' }), 'undo');
+  assert.equal(historyShortcut({ code: 'KeyZ' }), null);
+  assert.equal(historyShortcut({ ctrlKey: true, altKey: true, code: 'KeyZ' }), null);
+  assert.equal(historyShortcut({ ctrlKey: true, isComposing: true, code: 'KeyZ' }), null);
+});
+
+test('layout order defaults to random and accepts only known priorities', () => {
+  assert.equal(validateSettings({}).layoutOrder, 'random');
+  for (const value of ['random', 'newest', 'oldest']) assert.equal(validateSettings({ layoutOrder: value }).layoutOrder, value);
+  assert.throws(() => validateSettings({ layoutOrder: 'unsupported' }), /порядок кадров/);
+});
 import { emptySpacePercent } from '../public/coverage.js';
 import { photoSizeRange } from '../public/settings.js';
 import { validateSettings } from '../lib/storage.mjs';
@@ -55,6 +72,28 @@ test('undo and redo restore snapshots; a new edit discards the redo branch', () 
   history.undo([]); history.undo([]);
   assert.equal(history.undo([]), null);
   history.clear(); assert.equal(history.canRedo, false);
+});
+
+test('copies of one photo keep independent transforms and survive clearing, undo and redo', () => {
+  const history = createHistory();
+  const images = new Map([['photo', { width: 100, height: 100 }]]);
+  const settings = { width: 200, height: 100, border: 0 };
+  const frames = [
+    { id: 'photo', instanceId: 'copy-1', x: 50, y: 50, width: 100, angle: 0 },
+    { id: 'photo', instanceId: 'copy-2', x: 150, y: 50, width: 100, angle: 0 },
+  ];
+  assert.equal(emptySpacePercent(frames, images, settings), 0);
+  history.checkpoint(frames);
+  frames.find(item => item.instanceId === 'copy-2').angle = 35;
+  assert.equal(frames[0].angle, 0);
+  assert.equal(frames[1].angle, 35);
+  history.checkpoint(frames);
+  const restored = history.undo([]);
+  assert.deepEqual(restored, frames);
+  assert.deepEqual(history.redo(restored), []);
+  const afterClearUndo = history.undo([]);
+  assert.deepEqual(history.undo(afterClearUndo).map(frame => frame.angle), [0, 0]);
+  assert.equal(emptySpacePercent([], images, settings), 100);
 });
 
 test('image cache uses normal extensions and migrates legacy files without replacing originals', async t => {

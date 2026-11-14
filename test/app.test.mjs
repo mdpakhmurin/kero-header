@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, unlink, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, unlink, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { defaults, validateSettings, validateLayout, cacheValid } from '../lib/storage.mjs';
+import { defaults, validateSettings, validateLayout, cacheValid, writeJSON, saveImage, digest } from '../lib/storage.mjs';
 import { syncLibrary, paginate, wallPhotos, createVK, connectionError } from '../lib/vk.mjs';
 import { createApp } from '../server.mjs';
 import { generate, hitTest } from '../public/collage.js';
@@ -15,6 +15,61 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
 async function fixture(t) { const root = await mkdtemp(join(tmpdir(), 'kero-test-')); t.after(() => rm(root, { recursive: true, force: true })); return root; }
 const status = () => ({ done: 0, total: 0, downloaded: 0, cached: 0, skipped: 0, failed: 0, warnings: [] });
 const photo = id => ({ owner_id: -123, id, sizes: [{ width: 100, height: 100, url: `https://example.com/${id}.png` }] });
+
+test('file deletion is scoped to the selected source and VK community', async t => {
+  const root = await fixture(t), localId = `local_${digest(png)}`, vkId = 'vk_-123_1', otherId = 'vk_-456_2';
+  const photos = {};
+  for (const [id, source, community] of [[localId, 'local', undefined], [vkId, 'vk', defaults.community], [otherId, 'vk', 'another_group']]) {
+    photos[id] = { id, source, community, title: id, ...await saveImage(root, id, png) };
+  }
+  const orphan = `local_${'b'.repeat(64)}`;
+  await writeJSON(join(root, 'cache/library.json'), { photos });
+  await writeJSON(join(root, 'config/exclusions.json'), [localId, vkId, orphan]);
+  await writeFile(join(root, 'cache/images/keep.txt'), 'keep');
+  const server = await createApp(root);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = source => fetch(`${base}/api/files/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(source) });
+  assert.equal((await post({})).status, 400);
+  assert.equal((await post({ source: 'all' })).status, 400);
+  assert.equal(await cacheValid(root, photos[localId]), true);
+  assert.equal((await (await post({ source: 'vk' })).json()).removed, 1);
+  assert.equal(await cacheValid(root, photos[vkId]), false);
+  assert.equal(await cacheValid(root, photos[localId]), true);
+  assert.equal(await cacheValid(root, photos[otherId]), true);
+  await saveImage(root, vkId, png);
+  const removed = await (await post({ source: 'local' })).json();
+  assert.equal(removed.removed, 1);
+  assert.equal(removed.ids.includes(vkId), false);
+  assert.equal(await cacheValid(root, photos[localId]), false);
+  assert.equal(await cacheValid(root, photos[vkId]), true);
+  assert.equal(await cacheValid(root, photos[otherId]), true);
+  const state = await (await fetch(`${base}/api/state`)).json();
+  assert.deepEqual(state.photos.map(p => p.id).sort(), [vkId, otherId].sort());
+  assert.deepEqual(state.exclusions, [vkId]);
+  assert.equal(await readFile(join(root, 'cache/images/keep.txt'), 'utf8'), 'keep');
+});
+
+test('local addition dates are migrated, persisted and preserved during reimport', async t => {
+  const root = await fixture(t), id = `local_${digest(png)}`;
+  const metadata = await saveImage(root, id, png);
+  await writeJSON(join(root, 'cache/library.json'), { photos: { [id]: { id, source: 'local', title: 'Legacy photo', ...metadata } } });
+  const info = await stat(join(root, 'cache/images', `${id}.png`));
+  const server = await createApp(root);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const state = await (await fetch(base + '/api/state')).json();
+  const date = state.photos[0].addedAt;
+  assert.equal(date, Math.floor(info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs));
+  assert.equal(JSON.parse(await readFile(join(root, 'cache/library.json'), 'utf8')).photos[id].addedAt, date);
+  const response = await fetch(base + '/api/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Imported again', data: png.toString('base64') }) });
+  assert.equal(response.status, 200);
+  const after = await (await fetch(base + '/api/state')).json();
+  assert.equal(after.photos[0].addedAt, date);
+  assert.equal(after.photos.length, 1);
+});
 
 test('network errors explain the cause without exposing request secrets', async () => {
   let calls = 0;
@@ -174,7 +229,7 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   const { id } = await (await post('/api/import', { name: 'test.png', data: png.toString('base64') })).json();
   assert.match(id, /^local_/); assert.equal((await fetch(base + '/images/' + id)).headers.get('content-type'), 'image/png');
   const coverSizes = [...defaults.coverSizes, { width: 1600, height: 600 }];
-  const savedSettings = await (await post('/api/settings', { ...defaults, rotation: 50, seed: 42, scatter: 100, width: 1600, height: 600, coverSizes })).json();
+  const savedSettings = await (await post('/api/settings', { ...defaults, rotation: 50, layoutOrder: 'newest', seed: 42, scatter: 100, width: 1600, height: 600, coverSizes })).json();
   assert.equal('seed' in savedSettings, false);
   const savedFile = JSON.parse(await readFile(join(root, 'config/settings.json'), 'utf8'));
   assert.equal('seed' in savedFile, false);
@@ -199,6 +254,7 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   server.close(); await once(server, 'close'); server = await createApp(root, { vkFactory });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${server.address().port}`;
   state = await (await fetch(base + '/api/state')).json();
+  assert.equal(state.settings.layoutOrder, 'newest');
   assert.equal(state.settings.rotation, 50); assert.equal('seed' in state.settings, false); assert.equal('layout' in state, false); assert.deepEqual(state.exclusions, [id]);
   assert.equal(state.settings.width, 1600); assert.equal(state.settings.height, 600);
   assert.deepEqual(state.settings.coverSizes, coverSizes);
@@ -207,10 +263,11 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   assert.deepEqual(JSON.parse(await readFile(join(root, 'config/settings.json'), 'utf8')).coverSizes, coverSizes);
   await writeFile(join(root, 'cache/images/keep.txt'), 'unrelated file');
   assert.equal((await post('/api/cache/clear', {}, { Origin: 'https://evil.example' })).status, 403);
-  assert.equal((await (await post('/api/cache/clear', {})).json()).removed, 1);
-  assert.equal((await (await post('/api/cache/clear', {})).json()).removed, 0);
+  assert.equal((await post('/api/files/delete', {})).status, 400);
+  assert.equal((await (await post('/api/files/delete', { source: 'local' })).json()).removed, 1);
+  assert.equal((await (await post('/api/files/delete', { source: 'local' })).json()).removed, 0);
   state = await (await fetch(base + '/api/state')).json();
-  assert.equal(state.photos[0].available, false); assert.equal(state.photos.length, 1);
-  assert.equal(state.settings.rotation, 50); assert.deepEqual(state.exclusions, [id]);
+  assert.equal(state.photos.length, 0);
+  assert.equal(state.settings.rotation, 50); assert.deepEqual(state.exclusions, []);
   assert.equal(await readFile(join(root, 'cache/images/keep.txt'), 'utf8'), 'unrelated file');
 });

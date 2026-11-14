@@ -2,7 +2,7 @@ import http from 'node:http';
 import { readFile, stat, readdir, unlink, mkdir } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaults, readJSON, writeJSON, validateSettings, validId, digest, saveImage, imagePath, readImage, migrateImageFiles } from './lib/storage.mjs';
+import { defaults, readJSON, writeJSON, validateSettings, validId, digest, saveImage, imagePath, readImage, migrateImageFiles, migrateLocalDates } from './lib/storage.mjs';
 import { syncLibrary, createVK } from './lib/vk.mjs';
 import { openFolder } from './lib/folder.mjs';
 
@@ -14,6 +14,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
   let exclusions = await readJSON(join(root, 'config/exclusions.json'), []);
   let library = await readJSON(join(root, 'cache/library.json'), { photos: {}, lastSync: null });
   await migrateImageFiles(root, library);
+  await migrateLocalDates(root, library);
   let token = process.env.VK_TOKEN || '';
   let sync = { running: false, message: '', warnings: [] };
   let mutation = Promise.resolve();
@@ -44,18 +45,29 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       await folderOpener(directory);
       return json(res, 200, { opened: true });
     }
-    if (path === '/api/cache/clear') {
-      if (sync.running) return json(res, 409, { error: 'Дождитесь окончания синхронизации перед очисткой кеша' });
+    if (path === '/api/files/delete' || path === '/api/cache/clear') {
+      if (!['vk', 'local'].includes(input.source)) throw new Error('Выберите источник файлов: vk или local');
+      if (sync.running) return json(res, 409, { error: 'Дождитесь окончания синхронизации перед удалением файлов' });
       const directory = join(root, 'cache/images');
       const files = await readdir(directory, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+      const ids = new Set(Object.values(library.photos).filter(photo => input.source === 'local' ? photo.source === 'local' || photo.id.startsWith('local_') : photo.source === 'vk' && photo.community === settings.community).map(photo => photo.id));
+      if (input.source === 'local') exclusions.filter(id => id.startsWith('local_')).forEach(id => ids.add(id));
       let removed = 0;
       for (const file of files) {
         const match = /^(.*)\.(?:img|png|jpg|webp)$/.exec(file.name);
         if ((!file.isFile() && !file.isSymbolicLink()) || !match || !validId(match[1])) continue;
+        if (input.source === 'local' && match[1].startsWith('local_')) ids.add(match[1]);
+        if (!ids.has(match[1])) continue;
         try { await unlink(join(directory, file.name)); removed++; }
         catch (error) { if (error.code !== 'ENOENT') throw error; }
       }
-      return json(res, 200, { removed });
+      if (input.source === 'local') {
+        for (const id of ids) delete library.photos[id];
+        exclusions = exclusions.filter(id => !ids.has(id));
+        await writeJSON(join(root, 'cache/library.json'), library);
+        await writeJSON(join(root, 'config/exclusions.json'), exclusions);
+      }
+      return json(res, 200, { removed, ids: [...ids] });
     }
     if (path === '/api/exclusions') {
       if (!Array.isArray(input) || input.length > 100000 || !input.every(validId)) throw new Error('Некорректный список исключений');
@@ -86,7 +98,9 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       if (data.length > 30_000_000) throw new Error('Максимум 30 МБ на файл');
       const id = `local_${digest(data)}`;
       const metadata = await saveImage(root, id, data);
-      const photo = { id, source: 'local', title: String(input.name || 'Изображение').slice(0, 200), ...metadata };
+      const previousDate = library.photos[id]?.addedAt;
+      const addedAt = Number.isFinite(previousDate) && previousDate > 0 ? previousDate : Date.now();
+      const photo = { id, source: 'local', addedAt, title: String(input.name || 'Изображение').slice(0, 200), ...metadata };
       library.photos[id] = photo;
       await writeJSON(join(root, 'cache/library.json'), library);
       return json(res, 200, { id });

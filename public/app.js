@@ -1,7 +1,7 @@
-import { generate, hitTest, selectionGeometry, selectionHit, resizeSelection, rotateSelection, floatingPanelPosition } from './collage.js';
-import { photoSource } from './library.js';
+import { generateAsync, shuffleSources, manualFrames, hitTest, selectionGeometry, selectionHit, resizeSelection, rotateSelection, floatingPanelPosition } from './collage.js';
+import { photoSource, librarySource, sortLibraryPhotos, selectedLibraryPhotos } from './library.js';
 import { createPhotoRenderer, previewDimensions, renderDimensions, smooth } from './render.js';
-import { createHistory } from './history.js';
+import { createHistory, historyShortcut } from './history.js';
 import { emptySpacePercent } from './coverage.js';
 import { createPhotoViewer } from './viewer.js';
 const $ = selector => document.querySelector(selector);
@@ -9,10 +9,20 @@ const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-
 const preview = document.createElement('canvas'), photoRenderer = createPhotoRenderer();
 const canvasWrap = $('.canvas-wrap'), selectionPanel = $('#selection-panel'), selectionOutline = $('#selection-outline');
 const history = createHistory();
-const photoViewer = createPhotoViewer($('#photo-viewer'));
-let state, items = [], selected = null, filter = 'active', limit = 80, images = new Map(), drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false, coverageTimer, coverageKey;
+const photoViewer = createPhotoViewer($('#photo-viewer'), {
+  canAdd: photo => !loading && !generating && selectedLibraryPhotos([photo.id], state.photos, state.exclusions, state.settings.community).length > 0,
+  onAdd: photo => addPhotosToCanvas([photo.id]),
+  onError: report,
+});
+const libraryDialog = $('#library-dialog'), libraryChosen = new Set();
+let libraryBusy = false, librarySession = 0, libraryRendered = 0, libraryFrame = null;
+let state, items = [], selected = null, filter = 'active', limit = 60, images = new Map(), drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false, coverageTimer, coverageKey;
 let savedSettings, settingsSaving = false;
-let editingSelection = null;
+let generating = false;
+let historyQueue = Promise.resolve();
+let libraryOrigin = 'vk';
+const librarySort = { vk: { key: 'date', direction: 'desc' }, local: { key: 'area', direction: 'desc' } };
+const librarySizes = new Map();
 const numeric = ['rotation', 'border', 'shadow'];
 const numberInputs = [...form.querySelectorAll('input[data-range]')];
 async function api(path, data) {
@@ -35,6 +45,7 @@ function save(path, value) {
   return result;
 }
 function checkpoint() { clearTimeout(wheelTimer); wheelTimer = null; history.checkpoint(items); $('#undo').disabled = !history.canUndo; $('#redo').disabled = !history.canRedo; }
+function selectedItem() { return items.find(item => item.instanceId === selected); }
 function available() { return state.photos.filter(p => p.available && !state.exclusions.includes(p.id) && (p.source === 'local' || p.community === state.settings.community)); }
 function visibleItems() { const ids = new Set(available().map(p => p.id)); return items.filter(i => ids.has(i.id)); }
 function readSettings() {
@@ -44,6 +55,7 @@ function readSettings() {
   next.photoSize = Number(form.elements.photoSize.value);
   next.sizeDeviation = Number(form.elements.sizeDeviation.value);
   next.count = 0;
+  next.layoutOrder = form.elements.layoutOrder.value;
   next.background = form.elements.background.value;
   if (!form.reportValidity()) throw new Error('Проверьте параметры композиции');
   if (next.width * next.height > 32_000_000) throw new Error('Холст не должен превышать 32 мегапикселя');
@@ -64,13 +76,77 @@ function updateLabels() {
     range.style.setProperty('--range-progress', `${(Number(range.value) - Number(range.min)) / (Number(range.max) - Number(range.min)) * 100}%`);
   }
 }
-function fillCoverSizes() {
-  const select = $('#preset');
-  select.replaceChildren();
-  for (const size of state.settings.coverSizes) select.add(new Option(`${size.width} × ${size.height}`, `${size.width},${size.height}`));
-  select.add(new Option('＋ Добавить размер…', 'custom'));
-  select.value = `${state.settings.width},${state.settings.height}`;
+function closeCoverSizes(focus = false) {
+  $('#preset-menu').hidePopover();
+  if (focus) $('#preset-trigger').focus({ preventScroll: true });
 }
+function focusCoverOption(option) {
+  if (!option) return;
+  const menu = $('#preset-menu');
+  option.focus({ preventScroll: true });
+  if (option.offsetTop < menu.scrollTop) menu.scrollTop = option.offsetTop;
+  else if (option.offsetTop + option.offsetHeight > menu.scrollTop + menu.clientHeight) menu.scrollTop = option.offsetTop + option.offsetHeight - menu.clientHeight;
+}
+function positionCoverSizes() {
+  const menu = $('#preset-menu'), trigger = $('#preset-trigger'), rect = trigger.getBoundingClientRect();
+  menu.style.width = `${rect.width}px`;
+  const height = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, rect.bottom + height + 8 <= innerHeight ? rect.bottom + 6 : rect.top - height - 6)}px`;
+}
+function openCoverSizes() {
+  $('#preset-menu').showPopover(); positionCoverSizes();
+}
+function coverSizeLabel(size) {
+  return `${size.width} × ${size.height}${size.width === 1920 && size.height === 768 ? ' (Обложка VK)' : ''}`;
+}
+function fillCoverSizes() {
+  const input = $('#preset'), menu = $('#preset-menu');
+  input.value = `${state.settings.width},${state.settings.height}`;
+  $('#preset-value').textContent = coverSizeLabel(state.settings);
+  menu.replaceChildren();
+  const choices = [...state.settings.coverSizes.map(size => ({ value: `${size.width},${size.height}`, label: coverSizeLabel(size) })), { value: 'custom', label: 'Добавить размер…' }];
+  for (const choice of choices) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'preset-option';
+    button.setAttribute('role', 'option'); button.setAttribute('aria-selected', String(choice.value === input.value));
+    button.textContent = choice.label; button.dataset.value = choice.value;
+    if (choice.value === 'custom') button.classList.add('preset-option-add');
+    button.onclick = () => {
+      input.value = choice.value; closeCoverSizes(true);
+      if (choice.value !== 'custom') {
+        $('#preset-value').textContent = choice.label;
+        menu.querySelectorAll('[role=option]').forEach(option => option.setAttribute('aria-selected', String(option === button)));
+      }
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    menu.append(button);
+  }
+}
+$('#preset-menu').addEventListener('beforetoggle', event => {
+  if (event.newState !== 'open') return;
+  const rect = $('#preset-trigger').getBoundingClientRect(), menu = $('#preset-menu');
+  menu.style.width = `${rect.width}px`; menu.style.left = `${rect.left}px`; menu.style.top = `${rect.bottom + 6}px`;
+});
+$('#preset-menu').addEventListener('toggle', event => {
+  $('#preset-trigger').setAttribute('aria-expanded', String(event.newState === 'open'));
+  if (event.newState === 'open') positionCoverSizes();
+});
+$('#preset-trigger').onkeydown = event => {
+  if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+  event.preventDefault(); openCoverSizes();
+  const options = [...$('#preset-menu').querySelectorAll('[role=option]')];
+  focusCoverOption(options.find(option => option.getAttribute('aria-selected') === 'true') || options[0]);
+};
+$('#preset-menu').onkeydown = event => {
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeCoverSizes(true); return; }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const options = [...$('#preset-menu').querySelectorAll('[role=option]')], index = options.indexOf(document.activeElement);
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+  focusCoverOption(options[next]);
+};
+window.addEventListener('resize', () => closeCoverSizes());
+window.addEventListener('scroll', event => { if (!$('#preset-menu').contains(event.target)) closeCoverSizes(); }, true);
 function hasUnsavedSettings() {
   return savedSettings && JSON.stringify(state.settings) !== JSON.stringify(savedSettings);
 }
@@ -78,31 +154,30 @@ function updateSaveStatus() {
   const dirty = hasUnsavedSettings(), button = $('#save-settings');
   button.disabled = !dirty || settingsSaving;
   button.textContent = settingsSaving ? 'Сохраняем…' : 'Сохранить настройки';
-  $('#settings-save-status').textContent = dirty ? 'Есть несохранённые изменения' : 'Все изменения сохранены';
-  $('#settings-save-status').classList.toggle('unsaved', Boolean(dirty));
 }
 function updateSettings() {
   state.settings = readSettings();
   updateLabels(); draw(); updateSaveStatus();
 }
-async function loadImages(generationPhotos) {
+async function loadImages(generationPhotos, onProgress) {
   loading = true;
   const visible = new Set(visibleItems().map(item => item.id));
   const photos = generationPhotos ?? available().filter(photo => visible.has(photo.id));
   const needed = new Set(photos.map(photo => photo.id));
   for (const [id, bitmap] of images) if (!needed.has(id)) { photoRenderer.release(bitmap); bitmap.close(); images.delete(id); }
-  let index = 0;
+  let index = 0, completed = 0;
   const worker = async () => {
     while (index < photos.length) {
       const photo = photos[index++];
       const cached = images.get(photo.id);
-      if (cached) { photo.width ||= cached.width; photo.height ||= cached.height; continue; }
+      if (cached) { const dimensions = await librarySizes.get(photo.id); if (dimensions) Object.assign(photo, dimensions); else { photo.width ||= cached.width; photo.height ||= cached.height; } onProgress?.(++completed, photos.length); continue; }
       try {
         const response = await fetch(photo.src);
         if (!response.ok) throw new Error();
         const blob = await response.blob();
         let bitmap = await createImageBitmap(blob);
         photo.width = bitmap.width; photo.height = bitmap.height;
+        librarySizes.set(photo.id, Promise.resolve({ width: bitmap.width, height: bitmap.height }));
         if (Math.max(bitmap.width, bitmap.height) > 1200) {
           const factor = 1200 / Math.max(bitmap.width, bitmap.height);
           const reduced = await createImageBitmap(bitmap, { resizeWidth: Math.round(bitmap.width * factor), resizeHeight: Math.round(bitmap.height * factor), resizeQuality: 'high' });
@@ -110,9 +185,29 @@ async function loadImages(generationPhotos) {
         }
         images.set(photo.id, bitmap);
       } catch { photo.available = false; }
+      onProgress?.(++completed, photos.length);
     }
   };
   await Promise.all(Array.from({ length: 4 }, worker)); loading = false;
+}
+async function measureLibraryPhotos(photos) {
+  let index = 0;
+  const needed = photos.filter(photo => photo.available && !(photo.width > 0 && photo.height > 0));
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    while (index < needed.length) {
+      const photo = needed[index++];
+      if (!librarySizes.has(photo.id)) librarySizes.set(photo.id, new Promise(resolve => {
+        const image = new Image();
+        const finish = value => { clearTimeout(timer); image.onload = image.onerror = null; resolve(value); };
+        const timer = setTimeout(() => finish(null), 15000);
+        image.onload = () => finish({ width: image.naturalWidth, height: image.naturalHeight });
+        image.onerror = () => finish(null); image.src = photo.src;
+      }));
+      const pending = librarySizes.get(photo.id), size = await pending;
+      if (size) Object.assign(photo, size);
+      else if (librarySizes.get(photo.id) === pending) librarySizes.delete(photo.id);
+    }
+  }));
 }
 async function refresh() {
   const fresh = await api('state');
@@ -120,6 +215,7 @@ async function refresh() {
   savedSettings = structuredClone(fresh.settings); state = fresh;
   if (draft) state.settings = draft;
   fillForm(); updateSaveStatus(); await loadImages(); renderLibrary(); draw(); updateSelection();
+  measureLibraryPhotos(state.photos).then(() => renderLibrary()).catch(report);
   $('#sync').disabled = fresh.sync.running;
   if (fresh.sync.error) { const el = $('#sync-status'); el.hidden = false; el.classList.add('error'); el.textContent = syncMessage(fresh.sync); }
   if (fresh.sync.running) pollSync();
@@ -152,6 +248,7 @@ function draw() {
   $('#community-link').href = `https://vk.ru/${encodeURIComponent(s.community)}`;
   $('#dimensions').textContent = `${s.width} × ${s.height}`;
   $('#export').disabled = !visibleItems().length || loading;
+  $('#clear-canvas').disabled = !items.length || loading || generating;
   $('#undo').disabled = !history.canUndo;
   $('#redo').disabled = !history.canRedo;
   const visible = visibleItems();
@@ -166,9 +263,9 @@ function draw() {
   updateSelection();
 }
 function updateSelection() {
-  const visible = visibleItems(), item = visible.find(i => i.id === selected), image = images.get(selected);
+  const visible = visibleItems(), item = visible.find(i => i.instanceId === selected), image = images.get(selectedItem()?.id);
   selectionPanel.hidden = selectionOutline.hidden = !item || !image;
-  if (!item || !image) { editingSelection = null; return; }
+  if (!item || !image) { return; }
   const rect = canvas.getBoundingClientRect(), wrap = canvasWrap.getBoundingClientRect();
   const scale = rect.width / state.settings.width, ratio = image.height / image.width, border = state.settings.border;
   const origin = { x: rect.left - wrap.left, y: rect.top - wrap.top };
@@ -181,8 +278,6 @@ function updateSelection() {
   const bounds = [...geometry.corners, geometry.rotate].map(p => ({ x: origin.x + p.x * scale, y: origin.y + p.y * scale }));
   const position = floatingPanelPosition({ left: Math.min(...bounds.map(p => p.x)), right: Math.max(...bounds.map(p => p.x)), top: Math.min(...bounds.map(p => p.y)) - 7, bottom: Math.max(...bounds.map(p => p.y)) + 7 }, { width: selectionPanel.offsetWidth, height: selectionPanel.offsetHeight }, { width: canvasWrap.clientWidth, height: canvasWrap.clientHeight });
   selectionPanel.style.left = `${position.x}px`; selectionPanel.style.top = `${position.y}px`;
-  if (document.activeElement !== $('#selected-width')) $('#selected-width').value = Math.round(item.width);
-  if (document.activeElement !== $('#selected-angle')) $('#selected-angle').value = Math.round((((item.angle + 180) % 360 + 360) % 360 - 180) * 10) / 10;
   const index = visible.indexOf(item);
   $('#to-back').disabled = $('#layer-backward').disabled = index === 0;
   $('#to-front').disabled = $('#layer-forward').disabled = index === visible.length - 1;
@@ -191,61 +286,203 @@ function updateSelection() {
     grip.style.cursor = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][((Math.round(angle / 45) % 4) + 4) % 4];
   }
 }
-function renderLibrary() {
-  const excluded = new Set(state.exclusions), pool = state.photos.filter(p => p.source === 'local' || p.community === state.settings.community);
+function photoIcon(name) {
+  const paths = {
+    view: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+    source: '<path d="M14 3h7v7m0-7L10 14M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/>',
+    exclude: '<circle cx="12" cy="12" r="8"/><path d="m6 6 12 12"/>',
+    restore: '<path d="M3 10h11a6 6 0 0 1 0 12M3 10l5-5m-5 5 5 5"/>',
+  };
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true');
+  svg.innerHTML = paths[name]; return svg;
+}
+function renderLibrary({ append = false } = {}) {
+  if (!append && libraryFrame !== null) { cancelAnimationFrame(libraryFrame); libraryFrame = null; }
+  const knownSelection = new Set([...state.photos.map(photo => photo.id), ...state.exclusions]);
+  for (const id of libraryChosen) if (!knownSelection.has(id)) libraryChosen.delete(id);
+  const excluded = new Set(state.exclusions), all = state.photos.filter(p => librarySource(p) === 'local' || p.community === state.settings.community);
+  const pool = all.filter(p => librarySource(p) === libraryOrigin), order = librarySort[libraryOrigin];
+  $('#vk-count').textContent = all.filter(p => librarySource(p) === 'vk').length;
+  $('#local-count').textContent = all.filter(p => librarySource(p) === 'local').length;
   $('#library-count').textContent = pool.length;
-  $('#active-count').textContent = pool.filter(p => !excluded.has(p.id) && p.available).length;
-  $('#excluded-count').textContent = state.exclusions.length;
+  if (libraryOrigin === 'local' && filter === 'missing') filter = 'active';
+  $('#active-label').textContent = libraryOrigin === 'local' ? 'Добавленные' : 'Доступные';
+  $('#active-count').textContent = pool.filter(p => !excluded.has(p.id) && (libraryOrigin === 'local' || p.available)).length;
+  $('[data-filter=missing]').hidden = libraryOrigin === 'local';
+  $('#delete-files').title = libraryOrigin === 'vk' ? 'Удалить файлы из VK' : 'Удалить файлы, добавленные с компьютера';
+  $('#missing-label').textContent = libraryOrigin === 'local' ? 'Нет файла' : 'Нет в кеше';
+  $('#missing-label').parentElement.title = libraryOrigin === 'local' ? 'Копия файла в проекте отсутствует. Импортируйте фотографию снова.' : 'Скачанный файл отсутствует. Повторите синхронизацию VK.';
   $('#missing-count').textContent = pool.filter(p => !p.available && !excluded.has(p.id)).length;
-  const known = new Set(pool.map(p => p.id));
-  const excludedStubs = state.exclusions.filter(id => !known.has(id)).map(id => ({ id, title: id, available: false }));
-  const list = [...pool, ...(filter === 'excluded' ? excludedStubs : [])].filter(p => filter === 'excluded' ? excluded.has(p.id) : filter === 'missing' ? !p.available && !excluded.has(p.id) : p.available && !excluded.has(p.id));
-  const grid = $('#library-grid'); grid.replaceChildren();
-  for (const photo of list.slice(0, limit)) {
-    const card = document.createElement('div'); card.className = `photo-card${excluded.has(photo.id) ? ' excluded' : ''}${selected === photo.id ? ' selected' : ''}`;
+  const known = new Set(state.photos.map(p => p.id));
+  const excludedStubs = state.exclusions.filter(id => !known.has(id)).map(id => ({ id, title: id, available: false })).filter(p => librarySource(p) === libraryOrigin);
+  $('#excluded-count').textContent = pool.filter(p => excluded.has(p.id)).length + excludedStubs.length;
+  const list = sortLibraryPhotos([...pool, ...(filter === 'excluded' ? excludedStubs : [])].filter(p => filter === 'excluded' ? excluded.has(p.id) : filter === 'missing' ? !p.available && !excluded.has(p.id) : (libraryOrigin === 'local' || p.available) && !excluded.has(p.id)), order.key, order.direction);
+  document.querySelectorAll('.source-tab').forEach(button => { const active = button.dataset.source === libraryOrigin; button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active)); });
+  document.querySelectorAll('[data-sort]').forEach(button => {
+    const active = button.dataset.sort === order.key;
+    button.classList.toggle('active', active); button.classList.toggle('ascending', active && order.direction === 'asc');
+    button.setAttribute('aria-pressed', String(active));
+    const label = button.dataset.sort === 'date' ? (libraryOrigin === 'vk' ? 'По дате VK' : 'По добавлению') : 'По размеру (px)';
+    button.querySelector('span').textContent = label;
+    const direction = button.dataset.sort === 'date' ? (order.direction === 'desc' ? 'сначала новые' : 'сначала старые') : (order.direction === 'desc' ? 'сначала крупные' : 'сначала мелкие');
+    button.title = active ? `${label}: ${direction}. Нажмите, чтобы изменить направление.` : label;
+    button.setAttribute('aria-label', button.title);
+  });
+  $('#sort-date').hidden = false;
+  $('#vk-actions').hidden = libraryOrigin !== 'vk';
+  $('#import').hidden = libraryOrigin !== 'local';
+  const grid = $('#library-grid');
+  if (!append) { grid.replaceChildren(); libraryRendered = 0; }
+  for (const photo of list.slice(libraryRendered, limit)) {
+    const card = document.createElement('div'); card.className = `photo-card${excluded.has(photo.id) ? ' excluded' : ''}${libraryChosen.has(photo.id) ? ' selected' : ''}`;
     const source = photoSource(photo);
     const preview = document.createElement('button'); preview.type = 'button'; preview.className = 'photo-image';
-    preview.disabled = !photo.available;
-    preview.title = photo.available ? 'Посмотреть фото' : 'Нет файла в кеше: выполните синхронизацию или импортируйте снова';
-    preview.setAttribute('aria-label', `Посмотреть фото: ${photo.title}`);
-    preview.onclick = () => photoViewer.open(photo, list);
+    card.dataset.photoId = photo.id;
+    preview.title = 'Выбрать фотографию'; preview.setAttribute('aria-label', `Выбрать фотографию: ${photo.title}`);
+    preview.setAttribute('aria-pressed', String(libraryChosen.has(photo.id)));
+    preview.onclick = () => {
+      if (libraryChosen.has(photo.id)) libraryChosen.delete(photo.id); else libraryChosen.add(photo.id);
+      card.classList.toggle('selected', libraryChosen.has(photo.id));
+      preview.setAttribute('aria-pressed', String(libraryChosen.has(photo.id))); updateLibrarySelection();
+    };
     if (photo.available) { const img = document.createElement('img'); img.src = photo.src; img.loading = 'lazy'; img.alt = photo.title; img.draggable = false; preview.append(img); } else preview.textContent = 'Нет файла';
-    const choose = document.createElement('button'); choose.className = 'photo-toggle photo-add'; choose.type = 'button'; choose.textContent = '+'; choose.title = 'Выбрать на холсте или добавить в композицию'; choose.setAttribute('aria-label', `${choose.title}: ${photo.title}`); choose.disabled = !photo.available || excluded.has(photo.id);
-    choose.onclick = action(async () => {
-      if (!items.some(i => i.id === photo.id)) { checkpoint(); items.push({ id: photo.id, x: state.settings.width / 2, y: state.settings.height / 2, width: state.settings.photoSize, angle: 0 }); await loadImages(); }
-      selected = photo.id; draw(); updateSelection(); renderLibrary(); canvasWrap.scrollIntoView({ block: 'center' });
-    });
-    const toggle = document.createElement('button'); toggle.className = 'photo-toggle'; toggle.textContent = excluded.has(photo.id) ? '↶' : '×'; toggle.title = excluded.has(photo.id) ? 'Вернуть в генерацию' : 'Исключить из будущих генераций'; toggle.setAttribute('aria-label', toggle.title); toggle.onclick = action(() => toggleExclusion(photo.id));
-    card.append(preview, choose, toggle);
+    const badge = document.createElement('span'); badge.className = 'photo-select-badge'; badge.setAttribute('aria-hidden', 'true');
+    badge.innerHTML = '<svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7"/></svg>';
+    const actions = document.createElement('div'); actions.className = 'photo-actions';
+    card.append(preview, badge, actions);
     if (source) {
-      const link = document.createElement('a'); link.className = 'photo-toggle photo-source'; link.textContent = '↗';
+      const link = document.createElement('a'); link.className = 'photo-toggle photo-source'; link.append(photoIcon('source'));
       link.href = source.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = source.label; link.draggable = false;
-      link.setAttribute('aria-label', `${source.label}: ${photo.title}`); card.append(link);
+      link.setAttribute('aria-label', `${source.label}: ${photo.title}`); actions.append(link);
     }
-    grid.append(card);
+    const view = document.createElement('button'); view.type = 'button'; view.className = 'photo-toggle photo-view';
+    view.append(photoIcon('view')); view.disabled = !photo.available; view.title = 'Посмотреть фото';
+    view.setAttribute('aria-label', `Посмотреть фото: ${photo.title}`); view.onclick = () => photoViewer.open(photo, list);
+    actions.append(view); grid.append(card);
   }
-  $('#load-more').hidden = list.length <= limit;
+  libraryRendered = Math.min(limit, list.length);
+  const sentinel = $('#library-sentinel'); sentinel.hidden = libraryRendered >= list.length;
+  libraryObserver.unobserve(sentinel);
+  if (!sentinel.hidden && libraryDialog.open) libraryObserver.observe(sentinel);
+  updateLibrarySelection();
   $('#library-empty').hidden = list.length > 0;
-  $('#library-empty').textContent = filter === 'excluded' ? 'Исключённых кадров нет. Нажмите × на фото, чтобы больше не использовать его в генерациях.' : filter === 'missing' ? 'Все файлы на месте.' : pool.length ? 'Ничего не найдено.' : 'Здесь будет ваша коллекция. Добавьте файлы или подключите VK — фотографии сохранятся на компьютере.';
+  $('#library-empty').textContent = filter === 'excluded' ? 'Исключённых кадров нет. Выберите фотографии и нажмите «Исключить» внизу.' : filter === 'missing' ? 'Все файлы на месте.' : pool.length ? 'Ничего не найдено.' : libraryOrigin === 'vk' ? 'Здесь появятся фотографии из VK. Синхронизируйте библиотеку.' : 'Здесь появятся ваши фотографии. Нажмите «Загрузить».';
   document.querySelectorAll('.filter').forEach(b => b.classList.toggle('active', b.dataset.filter === filter));
+}
+function updateLibrarySelection() {
+  const ids = [...libraryChosen], eligible = selectedLibraryPhotos(ids, state.photos, state.exclusions, state.settings.community);
+  const allExcluded = ids.length > 0 && ids.every(id => state.exclusions.includes(id));
+  $('#library-selection-count').textContent = `Выбрано: ${ids.length}`;
+  $('#library-add').disabled = Boolean(libraryBusy) || !ids.length || eligible.length !== ids.length;
+  $('#library-add').textContent = libraryBusy === 'add' ? 'Добавляем…' : ids.length ? `Добавить (${ids.length})` : 'Добавить выбранные';
+  $('#library-add').title = eligible.length === ids.length ? 'Добавить выбранные фотографии на холст' : 'Для добавления выберите доступные фотографии без исключений';
+  $('#library-exclude').disabled = Boolean(libraryBusy) || !ids.length;
+  $('#library-exclude').textContent = allExcluded ? 'Вернуть в генерацию' : 'Исключить';
+  for (const part of libraryDialog.querySelectorAll('.library-top, .library-sources, .library-filters, .library-content')) part.inert = Boolean(libraryBusy);
+}
+const libraryObserver = new IntersectionObserver(entries => {
+  if ($('#library-sentinel').hidden || !entries.some(entry => entry.isIntersecting) || !libraryDialog.open || libraryBusy || libraryFrame !== null) return;
+  libraryFrame = requestAnimationFrame(() => { libraryFrame = null; limit += 60; renderLibrary({ append: true }); });
+}, { root: $('#library-content'), rootMargin: '400px 0px' });
+function openLibrary() {
+  if (loading || generating || libraryBusy) return;
+  closeCoverSizes(); libraryChosen.clear(); librarySession++; limit = 60;
+  libraryDialog.showModal(); renderLibrary(); $('#library-content').scrollTop = 0;
+}
+document.querySelectorAll('[data-open-library]').forEach(button => button.onclick = openLibrary);
+$('#library-close').onclick = $('#library-cancel').onclick = () => libraryDialog.close();
+libraryDialog.addEventListener('close', () => {
+  librarySession++; libraryChosen.clear(); libraryObserver.unobserve($('#library-sentinel'));
+  if (libraryFrame !== null) { cancelAnimationFrame(libraryFrame); libraryFrame = null; }
+});
+async function addPhotosToCanvas(ids, shouldCommit = () => true) {
+  if (loading || generating) throw new Error('Дождитесь завершения текущей операции');
+  const photos = selectedLibraryPhotos(ids, state.photos, state.exclusions, state.settings.community);
+  if (!photos.length || photos.length !== ids.length) throw new Error('Выберите доступные фотографии без исключений');
+  const needed = new Set([...visibleItems().map(item => item.id), ...ids]);
+  await loadImages(available().filter(photo => needed.has(photo.id)));
+  if (!shouldCommit()) return [];
+  const ready = selectedLibraryPhotos(ids, state.photos, state.exclusions, state.settings.community);
+  if (!ready.length) throw new Error('Не удалось загрузить выбранные фотографии. Выполните синхронизацию или загрузите файлы снова.');
+  const frames = manualFrames(ready, state.settings, items);
+  checkpoint(); items.push(...frames); selected = frames.at(-1).instanceId;
+  draw(); renderLibrary();
+  toast(`Добавлено кадров: ${frames.length}.${ready.length < ids.length ? ' Часть файлов недоступна.' : ''}`);
+  return frames;
+}
+$('#library-add').onclick = action(async () => {
+  if (libraryBusy || !libraryChosen.size) return;
+  const ids = [...libraryChosen], session = librarySession;
+  libraryBusy = 'add'; updateLibrarySelection();
+  try {
+    const frames = await addPhotosToCanvas(ids, () => libraryDialog.open && session === librarySession);
+    if (frames.length) libraryDialog.close();
+  } finally { libraryBusy = false; updateLibrarySelection(); draw(); }
+});
+$('#library-exclude').onclick = action(async () => {
+  if (libraryBusy || !libraryChosen.size) return;
+  const ids = [...libraryChosen], restoring = ids.every(id => state.exclusions.includes(id));
+  libraryBusy = 'exclude'; updateLibrarySelection();
+  try {
+    if (!restoring && !await confirmAction({ title: `Исключить фотографии (${ids.length})?`, description: 'Выбранные фотографии перестанут участвовать в генерации. Вернуть их можно во вкладке «Исключённые».', label: 'Исключить' })) return;
+    const next = new Set(state.exclusions);
+    for (const id of ids) { if (restoring) next.delete(id); else next.add(id); }
+    await save('exclusions', [...next]); state.exclusions = [...next];
+    if (selectedItem() && next.has(selectedItem().id)) selected = null;
+    libraryChosen.clear(); if (restoring) await loadImages(); draw(); renderLibrary();
+  } finally { libraryBusy = false; updateLibrarySelection(); }
+});
+function confirmAction({ title, description, label, photo }) {
+  const dialog = $('#exclude-dialog'), image = $('#exclude-preview');
+  $('#exclude-title').textContent = title; $('#exclude-description').textContent = description;
+  dialog.querySelector('button[value=exclude]').textContent = label;
+  image.hidden = !photo?.available;
+  if (photo?.available) image.src = photo.src; else image.removeAttribute('src');
+  dialog.returnValue = '';
+  return new Promise(resolve => {
+    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'exclude'), { once: true });
+    dialog.showModal();
+  });
 }
 async function toggleExclusion(id) {
   const restoring = state.exclusions.includes(id);
+  if (!restoring && !await confirmAction({ title: 'Исключить фотографию?', description: 'Фотография больше не будет участвовать в генерации. Её можно вернуть во вкладке «Исключённые».', label: 'Исключить', photo: state.photos.find(p => p.id === id) })) return;
   const next = restoring ? state.exclusions.filter(p => p !== id) : [...state.exclusions, id];
   await save('exclusions', next); state.exclusions = next;
-  if (selected === id) selected = null;
+  if (selectedItem()?.id === id) selected = null;
   if (restoring) await loadImages();
   renderLibrary(); draw(); updateSelection();
   toast(restoring ? 'Кадр снова участвует в генерации' : 'Кадр исключён. Вернуть его можно во вкладке «Исключённые».');
 }
+function generationProgress(value, message) {
+  $('#generate').textContent = `Перемешиваем… ${Math.round(value)}%`;
+}
 async function shuffle() {
+  if (generating) return;
   if (loading) throw new Error('Дождитесь загрузки изображений');
   if (!available().length) throw new Error('Сначала добавьте фотографии');
   updateSettings();
-  const photos = available();
-  await loadImages(photos);
-  checkpoint(); items = generate(photos.filter(photo => photo.available), state.settings); selected = null;
-  draw(); updateSelection(); renderLibrary();
+  generating = true;
+  const button = $('#generate'); button.disabled = true; $('#clear-canvas').disabled = true; button.setAttribute('aria-busy', 'true');
+  $('.editor-area').inert = form.inert = true; $('#save-settings').disabled = true;
+  try {
+    generationProgress(0, 'Подготовка фотографий');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const onCanvas = visibleItems(), frameIds = new Set(onCanvas.map(item => item.id));
+    const photos = onCanvas.length ? available().filter(photo => frameIds.has(photo.id)) : available();
+    await loadImages(photos, (done, total) => generationProgress(total ? done / total * 35 : 35, `Подготовка фото: ${done} / ${total}`));
+    const settings = structuredClone(state.settings);
+    const result = await generateAsync(shuffleSources(photos.filter(photo => photo.available), onCanvas), settings, (done, total) => generationProgress(35 + (total ? done / total : 1) * 60, `Расстановка кадров: ${done} / ${total}`));
+    checkpoint(); items = result.map(item => ({ ...item, instanceId: item.instanceId || crypto.randomUUID() })); selected = null;
+    generationProgress(95, 'Отрисовка обложки');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    draw(); renderLibrary(); generationProgress(100, 'Готово');
+    await new Promise(resolve => setTimeout(resolve, 0));
+  } finally {
+    generating = false; button.disabled = false; button.removeAttribute('aria-busy'); button.textContent = 'Перемешать кадры';
+    $('.editor-area').inert = form.inert = false; $('#clear-canvas').disabled = !items.length; updateSaveStatus();
+  }
 }
 form.addEventListener('submit', e => e.preventDefault());
 form.addEventListener('input', action(event => {
@@ -303,24 +540,28 @@ $('#size-form').onsubmit = action(event => {
   finally { button.disabled = false; button.textContent = 'Добавить и выбрать'; }
 });
 $('#generate').onclick = action(() => shuffle());
+$('#clear-canvas').onclick = action(async () => {
+  if (loading || generating || !items.length) return;
+  checkpoint(); items = []; selected = null; endDrag();
+  await loadImages(); draw(); renderLibrary();
+});
 function point(event) { const rect = canvas.getBoundingClientRect(); return { x: (event.clientX - rect.left) * state.settings.width / rect.width, y: (event.clientY - rect.top) * state.settings.height / rect.height }; }
 function itemAt(p) {
   return [...visibleItems()].reverse().find(i => { const image = images.get(i.id); return image && hitTest(i, image.height / image.width, p.x, p.y, state.settings.border); });
 }
 canvasWrap.onpointerdown = event => {
   if (!event.isPrimary || event.button !== 0 || event.target.closest('.selection')) return;
-  if (selectionPanel.contains(document.activeElement)) document.activeElement.blur();
-  const p = point(event), current = visibleItems().find(i => i.id === selected), image = images.get(selected);
+  const p = point(event), current = visibleItems().find(i => i.instanceId === selected), image = images.get(selectedItem()?.id);
   const scale = canvas.clientWidth / state.settings.width;
   const geometry = current && image && selectionGeometry(current, image.height / image.width, state.settings.border, scale);
   const grip = event.target.closest('.selection-grip');
   const handle = geometry && (grip ? { type: 'resize', ...geometry.corners.find(c => c.sx === Number(grip.dataset.sx) && c.sy === Number(grip.dataset.sy)) } : event.target.closest('#selection-rotate') ? { type: 'rotate' } : selectionHit(geometry, p, scale));
   const item = handle ? current : event.target === canvas ? itemAt(p) : null;
-  selected = item?.id || null;
+  selected = item?.instanceId || null;
   if (item) {
     event.preventDefault();
     drag = { item, start: { ...item }, point: p, handle, ratio: images.get(item.id).height / images.get(item.id).width, pointerAngle: Math.atan2(p.y - item.y, p.x - item.x), changed: false };
-    canvasWrap.setPointerCapture(event.pointerId); canvasWrap.classList.add('transforming');
+    canvasWrap.setPointerCapture(event.pointerId); canvasWrap.classList.add('transforming'); canvasWrap.classList.toggle('rotating', handle?.type === 'rotate');
   }
   draw(); updateSelection(); renderLibrary();
 };
@@ -335,28 +576,16 @@ canvasWrap.onpointermove = event => {
   if (!drag.changed) { checkpoint(); drag.changed = true; }
   Object.assign(drag.item, next); draw();
 };
-const endDrag = () => { drag = null; canvasWrap.classList.remove('transforming'); };
+const endDrag = () => { drag = null; canvasWrap.classList.remove('transforming', 'rotating'); };
 canvasWrap.onpointerup = canvasWrap.onpointercancel = canvasWrap.onlostpointercapture = endDrag;
 canvas.addEventListener('wheel', event => {
-  const item = items.find(i => i.id === selected); if (!item) return;
+  const item = items.find(i => i.instanceId === selected); if (!item) return;
   event.preventDefault(); if (!wheelTimer) checkpoint();
   if (!event.shiftKey) item.angle = (item.angle + Math.sign(event.deltaY) * 4) % 360;
   else item.width = Math.max(10, Math.min(10000, item.width * (event.deltaY > 0 ? .95 : 1.05)));
   draw(); updateSelection(); clearTimeout(wheelTimer); wheelTimer = setTimeout(() => { wheelTimer = null; }, 250);
 }, { passive: false });
-async function editSelected(fn) { const item = items.find(i => i.id === selected); if (!item) return; checkpoint(); fn(item); draw(); updateSelection(); }
-for (const [id, key] of [['#selected-width', 'width'], ['#selected-angle', 'angle']]) {
-  const input = $(id);
-  input.oninput = () => {
-    const item = visibleItems().find(i => i.id === selected);
-    if (!item || !input.validity.valid || input.value === '') return;
-    const value = Number(input.value); if (item[key] === value) return;
-    if (editingSelection !== input) { checkpoint(); editingSelection = input; }
-    item[key] = value; draw();
-  };
-  input.onblur = () => { editingSelection = null; updateSelection(); };
-  input.onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); input.blur(); } };
-}
+async function editSelected(fn) { const item = items.find(i => i.instanceId === selected); if (!item) return; checkpoint(); fn(item); draw(); updateSelection(); }
 selectionPanel.addEventListener('keydown', event => {
   if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); selected = null; draw(); renderLibrary(); }
 });
@@ -379,7 +608,7 @@ function stepLayer(item, direction) {
 $('#layer-backward').onclick = action(() => editSelected(item => stepLayer(item, -1)));
 $('#layer-forward').onclick = action(() => editSelected(item => stepLayer(item, 1)));
 $('#remove').onclick = action(async () => { await editSelected(item => { items = items.filter(i => i !== item); selected = null; }); renderLibrary(); });
-$('#exclude-selected').onclick = action(() => selected && toggleExclusion(selected));
+$('#exclude-selected').onclick = action(() => selectedItem() && toggleExclusion(selectedItem().id));
 async function restoreHistory(direction) {
   if (loading) throw new Error('Дождитесь загрузки изображений');
   const restored = history[direction](items);
@@ -388,15 +617,21 @@ async function restoreHistory(direction) {
   items = restored; selected = null;
   await loadImages(); draw(); updateSelection(); renderLibrary();
 }
-$('#undo').onclick = action(() => restoreHistory('undo'));
-$('#redo').onclick = action(() => restoreHistory('redo'));
+function queueHistory(direction) {
+  historyQueue = historyQueue.catch(() => {}).then(() => restoreHistory(direction));
+  return historyQueue;
+}
+$('#undo').onclick = action(() => queueHistory('undo'));
+$('#redo').onclick = action(() => queueHistory('redo'));
 window.addEventListener('keydown', event => {
-  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName) || $('#connect-dialog').open || $('#size-dialog').open || $('#photo-viewer').open) return;
-  if (event.ctrlKey || event.metaKey) {
-    const key = event.key.toLowerCase();
-    if (key === 'y' || key === 'z' && event.shiftKey) { event.preventDefault(); $('#redo').click(); }
-    else if (key === 'z') { event.preventDefault(); $('#undo').click(); }
-  }
+  if (generating || document.querySelector('dialog[open]')) return;
+  if (event.key === 'Escape' && $('#preset-menu').matches(':popover-open')) { event.preventDefault(); closeCoverSizes(true); return; }
+  const target = event.target;
+  const editingText = target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' && ['text', 'url', 'password', 'email', 'tel', 'search'].includes(target.type);
+  if (editingText) return;
+  const direction = historyShortcut(event);
+  if (direction) { event.preventDefault(); action(() => queueHistory(direction))(); return; }
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName)) return;
   if (event.key === 'Delete' && selected) { event.preventDefault(); $('#remove').click(); }
   if (event.key === 'Escape') { selected = null; draw(); updateSelection(); }
 });
@@ -433,20 +668,38 @@ $('#export').onclick = action(async () => {
     button.disabled = false; button.textContent = 'Экспорт PNG';
   }
 });
-document.querySelectorAll('.filter').forEach(b => b.onclick = () => { filter = b.dataset.filter; limit = 80; renderLibrary(); });
-$('#load-more').onclick = () => { limit += 80; renderLibrary(); };
+function changeLibraryView(change) {
+  change(); limit = 60; renderLibrary(); $('#library-content').scrollTop = 0;
+}
+document.querySelectorAll('.filter').forEach(button => button.onclick = () => {
+  if (filter !== button.dataset.filter) changeLibraryView(() => { filter = button.dataset.filter; });
+});
+document.querySelectorAll('.source-tab').forEach(button => button.onclick = () => {
+  if (libraryOrigin !== button.dataset.source) changeLibraryView(() => { libraryOrigin = button.dataset.source; });
+});
+document.querySelectorAll('[data-sort]').forEach(button => button.onclick = () => changeLibraryView(() => {
+  const current = librarySort[libraryOrigin];
+  librarySort[libraryOrigin] = { key: button.dataset.sort, direction: current.key === button.dataset.sort && current.direction === 'desc' ? 'asc' : 'desc' };
+}));
 $('#import').onclick = () => $('#file-input').click();
-$('#clear-cache').onclick = action(async () => {
-  if (loading) throw new Error('Дождитесь загрузки изображений');
-  if (!confirm('Удалить все изображения из локального кеша? Фото VK можно скачать повторно синхронизацией. Файлы, добавленные с компьютера, потребуется импортировать снова. Настройки и исключения сохранятся.')) return;
-  const button = $('#clear-cache'); button.disabled = true;
+$('#delete-files').onclick = action(async () => {
+  if (loading || generating) throw new Error('Дождитесь завершения текущей операции');
+  const source = libraryOrigin;
+  const title = source === 'vk' ? 'Удалить файлы из VK?' : 'Удалить добавленные файлы?';
+  const description = source === 'vk'
+    ? 'Будут удалены скачанные файлы текущего сообщества VK, включая исключённые. Их можно скачать повторной синхронизацией. Фотографии с компьютера останутся.'
+    : 'Все добавленные с компьютера фотографии, включая исключённые, будут удалены из библиотеки проекта. Исходные файлы на компьютере и фотографии из VK останутся.';
+  if (!await confirmAction({ title, description, label: 'Удалить файлы' })) return;
+  const button = $('#delete-files'); button.disabled = true;
   try {
     await saveQueue;
-    const result = await api('cache/clear', {});
-    items = []; history.clear(); selected = null; drag = null;
-    for (const bitmap of images.values()) { photoRenderer.release(bitmap); bitmap.close(); } images.clear();
+    const result = await api('files/delete', { source }), removedIds = new Set(result.ids);
+    items = items.filter(item => !removedIds.has(item.id)); history.clear();
+    if (!selectedItem()) selected = null; endDrag();
+    for (const [id, bitmap] of images) if (removedIds.has(id)) { photoRenderer.release(bitmap); bitmap.close(); images.delete(id); }
+    for (const id of removedIds) librarySizes.delete(id);
     await refresh();
-    toast(`Кеш очищен. Удалено файлов: ${result.removed}.`);
+    toast(`Удалено файлов: ${result.removed}.`);
   } finally { button.disabled = false; }
 });
 $('#file-input').onchange = action(async event => {
@@ -458,12 +711,13 @@ $('#file-input').onchange = action(async event => {
       toast(`Импорт ${imported + errors.length + 1} / ${files.length}: ${file.name}`);
       try {
         if (file.size > 30_000_000) throw new Error('больше 30 МБ');
-        const bitmap = await createImageBitmap(file); bitmap.close();
+        const bitmap = await createImageBitmap(file), dimensions = { width: bitmap.width, height: bitmap.height }; bitmap.close();
         const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result.split(',')[1]); reader.onerror = reject; reader.readAsDataURL(file); });
-        await api('import', { name: file.name, data }); imported++;
+        const result = await api('import', { name: file.name, data }); librarySizes.set(result.id, Promise.resolve(dimensions)); imported++;
       } catch (e) { errors.push(`${file.name}: ${e.message || 'не удалось прочитать изображение'}`); }
     }
-    await refresh(); if (!items.length && available().length) await shuffle();
+    if (imported) { libraryOrigin = 'local'; filter = 'active'; }
+    await refresh();
     toast(`Добавлено: ${imported}.${errors.length ? ` Ошибки: ${errors.join('; ')}` : ''}`, Boolean(errors.length));
   } finally { $('#import').disabled = false; event.target.value = ''; }
 });
@@ -496,10 +750,15 @@ async function pollSync() {
   try {
     while (true) {
       const progress = await api('sync'), el = $('#sync-status'); el.hidden = false; el.classList.toggle('error', Boolean(progress.error || progress.failed || progress.warnings.length)); el.textContent = syncMessage(progress);
-      if (!progress.running) { await saveQueue; await refresh(); if (!items.length && available().length) await shuffle(); break; }
+      if (!progress.running) { await saveQueue; await refresh(); break; }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
   } catch (e) { report(e); } finally { polling = false; $('#sync').disabled = false; }
 }
+document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('click', event => {
+  if (event.target !== dialog) return;
+  const rect = dialog.getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+}));
 window.addEventListener('resize', () => state && draw());
 await refresh().catch(report);

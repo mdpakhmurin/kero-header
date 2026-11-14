@@ -9,16 +9,32 @@ export function imageViewport(image, viewport, zoom = 1, pan = { x: 0, y: 0 }) {
   return { zoom, fit, min, max, x: Math.max(-maxX, Math.min(maxX, pan.x)), y: Math.max(-maxY, Math.min(maxY, pan.y)), percent: fit * zoom * 100, canPan: maxX > 0 || maxY > 0 };
 }
 
-export function createPhotoViewer(dialog) {
+export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError = () => {} } = {}) {
   const image = dialog.querySelector('#viewer-image'), message = dialog.querySelector('#viewer-message');
   const strip = dialog.querySelector('#viewer-strip'), position = dialog.querySelector('#viewer-position');
   const previous = dialog.querySelector('#viewer-previous'), next = dialog.querySelector('#viewer-next');
   const source = dialog.querySelector('#viewer-source');
+  const add = dialog.querySelector('#viewer-add'), addLabel = dialog.querySelector('#viewer-add-label');
   const wrap = dialog.querySelector('.viewer-image-wrap'), zoomOut = dialog.querySelector('#viewer-zoom-out'), zoomIn = dialog.querySelector('#viewer-zoom-in');
   const zoomPercent = dialog.querySelector('#viewer-zoom-percent'), fitButton = dialog.querySelector('#viewer-fit');
   const zoomControls = [zoomOut, zoomIn, zoomPercent, fitButton];
   let photos = [], index = 0, thumbs = [];
   let zoom = 1, pan = { x: 0, y: 0 }, drag = null;
+  let adding = false, addedPhoto = null;
+  function renderAdd() {
+    const photo = photos[index];
+    add.hidden = typeof onAdd !== 'function';
+    add.disabled = adding || !photo || !canAdd(photo);
+    addLabel.textContent = adding ? 'Добавляем…' : photo?.id === addedPhoto ? 'Добавить ещё' : 'Добавить';
+  }
+  add.onclick = async () => {
+    const photo = photos[index];
+    if (adding || !photo || !canAdd(photo) || !onAdd) return;
+    adding = true; renderAdd();
+    try { await onAdd(photo); addedPhoto = photo.id; }
+    catch (error) { onError(error); }
+    finally { adding = false; renderAdd(); }
+  };
 
   function geometry() {
     if (!image.naturalWidth || !wrap.clientWidth || !wrap.clientHeight || image.hidden) return null;
@@ -74,6 +90,7 @@ export function createPhotoViewer(dialog) {
     thumbs[index]?.removeAttribute('aria-current');
     index = Math.max(0, Math.min(photos.length - 1, target));
     const photo = photos[index];
+    renderAdd();
     const caption = dialog.querySelector('#viewer-photo-name');
     const name = photo.source === 'vk' ? 'Фото из VK' : photo.title;
     caption.textContent = name;
@@ -120,6 +137,7 @@ export function createPhotoViewer(dialog) {
     endDrag();
     image.onload = image.onerror = null; image.removeAttribute('src');
     strip.replaceChildren(); photos = []; thumbs = [];
+    addedPhoto = null;
   });
 
   return {

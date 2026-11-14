@@ -1,11 +1,19 @@
 import { photoSizeRange } from './settings.js';
+import { photoTime } from './library.js';
 
 export function random(seed) {
   return () => { let t = seed += 0x6D2B79F5; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; };
 }
-export function generate(photos, settings, seed = Math.floor(Math.random() * 4294967296)) {
+function* generationSteps(photos, settings, seed) {
   const r = random(seed), pool = [...photos].sort((a, b) => a.id.localeCompare(b.id));
-  for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+  const ordered = settings.layoutOrder === 'newest' || settings.layoutOrder === 'oldest';
+  if (ordered) pool.sort((a, b) => {
+    const av = photoTime(a), bv = photoTime(b);
+    if (av === null && bv !== null) return 1;
+    if (bv === null && av !== null) return -1;
+    return av !== null && bv !== null ? (av - bv) * (settings.layoutOrder === 'newest' ? -1 : 1) : 0;
+  });
+  else for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
   const selected = settings.count ? pool.slice(0, settings.count) : pool;
   if (!selected.length) return [];
   const width = settings.width, height = settings.height, border = settings.border || 0;
@@ -19,11 +27,12 @@ export function generate(photos, settings, seed = Math.floor(Math.random() * 429
   const holePositions = Int32Array.from(holes);
   const frames = selected.map(photo => {
     const ratio = photo.height / photo.width;
-    const item = { id: photo.id, x: 0, y: 0, width: Math.round(minSize + r() * (maxSize - minSize)), angle: Math.round((r() * 2 - 1) * settings.rotation) };
+    const item = { id: photo.id, ...(photo.instanceId ? { instanceId: photo.instanceId } : {}), x: 0, y: 0, width: Math.round(minSize + r() * (maxSize - minSize)), angle: Math.round((r() * 2 - 1) * settings.rotation) };
     const halfW = item.width / 2 + border, halfH = item.width * (Number.isFinite(ratio) && ratio > 0 ? ratio : 1) / 2 + border;
     const angle = item.angle * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
     return { item, halfW, halfH, cos, sin, extentX: Math.abs(halfW * cos) + Math.abs(halfH * sin), extentY: Math.abs(halfW * sin) + Math.abs(halfH * cos) };
-  }).sort((a, b) => b.halfW * b.halfH - a.halfW * a.halfH);
+  });
+  if (!ordered) frames.sort((a, b) => b.halfW * b.halfH - a.halfW * a.halfH);
 
   function coverage(frame, x, y, mark = false) {
     const { halfW, halfH, cos, sin, extentX, extentY } = frame;
@@ -53,6 +62,8 @@ export function generate(photos, settings, seed = Math.floor(Math.random() * 429
     const spacing = (length - 2 * extent) / (count - 1);
     return extent + Math.max(0, Math.min(count - 1, Math.round((point - extent) / spacing))) * spacing;
   }
+  let completed = 0;
+  yield { done: 0, total: frames.length };
   for (const frame of frames) {
     const { item, extentX, extentY } = frame;
     let best = { x: width / 2, y: height / 2, score: -1 };
@@ -82,12 +93,54 @@ export function generate(photos, settings, seed = Math.floor(Math.random() * 429
       best.y = Math.min(extentY, height / 2) + r() * Math.max(0, height - 2 * extentY);
     }
     item.x = best.x; item.y = best.y;
+    yield { done: ++completed, total: frames.length };
   }
-  return frames.map(frame => frame.item);
+  // Place priority photos first, and draw them last so later frames cannot hide them.
+  return (ordered ? frames.reverse() : frames).map(frame => frame.item);
+}
+export function shuffleSources(photos, frames = []) {
+  if (!frames.length) return [...photos];
+  const byId = new Map(photos.map(photo => [photo.id, photo]));
+  return frames.filter(frame => byId.has(frame.id)).map(frame => ({ ...byId.get(frame.id), instanceId: frame.instanceId }));
+}
+
+export function generate(photos, settings, seed = Math.floor(Math.random() * 4294967296)) {
+  const steps = generationSteps(photos, settings, seed);
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+export async function generateAsync(photos, settings, onProgress = () => {}, seed = Math.floor(Math.random() * 4294967296)) {
+  const steps = generationSteps(photos, settings, seed);
+  let step = steps.next(), lastYield = performance.now();
+  while (!step.done) {
+    onProgress(step.value.done, step.value.total);
+    if (step.value.done === 0 || performance.now() - lastYield >= 12) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      lastYield = performance.now();
+    }
+    step = steps.next();
+  }
+  return step.value;
 }
 export function hitTest(item, ratio, x, y, border = 0) {
   const a = -item.angle * Math.PI / 180, dx = x - item.x, dy = y - item.y;
   return Math.abs(dx * Math.cos(a) - dy * Math.sin(a)) <= item.width / 2 + border && Math.abs(dx * Math.sin(a) + dy * Math.cos(a)) <= item.width * ratio / 2 + border;
+}
+
+export function manualFrames(photos, settings, existing = [], makeId = () => crypto.randomUUID()) {
+  const counts = new Map();
+  for (const frame of existing) counts.set(frame.id, (counts.get(frame.id) || 0) + 1);
+  return photos.map((photo, index) => {
+    const copies = counts.get(photo.id) || 0;
+    counts.set(photo.id, copies + 1);
+    const offset = copies % 8 * 32, spacing = Math.min(settings.photoSize * .45, settings.width / 6, settings.height / 6);
+    return {
+      id: photo.id, instanceId: makeId(), width: settings.photoSize, angle: 0,
+      x: Math.max(10, Math.min(settings.width - 10, settings.width / 2 + offset + (photos.length > 1 ? (index % 3 - 1) * spacing : 0))),
+      y: Math.max(10, Math.min(settings.height - 10, settings.height / 2 + offset + (photos.length > 1 ? (Math.floor(index / 3) % 3 - 1) * spacing : 0))),
+    };
+  });
 }
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
