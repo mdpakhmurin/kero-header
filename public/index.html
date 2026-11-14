@@ -8,13 +8,12 @@
         <form id="settings-form">
           <label class="field-label">Размер обложки <select id="preset"><option value="1920,768">1920 × 768</option><option value="1590,400">1590 × 400</option><option value="custom">＋ Добавить размер…</option></select></label>
           <div class="divider"></div>
-          <label class="range-label">Размер фотографий <output id="photo-size-out"></output><input name="photoSize" type="range" min="20" max="800" step="1"></label>
-          <label class="range-label">Случайное отклонение размера <output id="size-deviation-out"></output><input name="sizeDeviation" type="range" min="0" max="1990" step="1"></label>
-          <label class="range-label">Вращение <output id="rotation-out"></output><input name="rotation" type="range" min="0" max="180"></label>
-          <label class="range-label">Случайность позиций <output id="scatter-out"></output><input name="scatter" type="range" min="0" max="100"></label><div class="range-hints"><span>Ближе к сетке</span><span>Свободно</span></div>
+          <div class="range-label"><label for="photo-size-slider">Размер фотографий</label><span class="range-value"><input id="photo-size-out" type="number" data-range="photoSize" min="20" max="800" step="1" required aria-label="Размер фотографий, px"><span>px</span></span><input id="photo-size-slider" name="photoSize" type="range" min="20" max="800" step="1"></div>
+          <div class="range-label"><label for="size-deviation-slider">Случайное отклонение размера</label><span class="range-value"><span>±</span><input id="size-deviation-out" type="number" data-range="sizeDeviation" min="0" max="1990" step="1" required aria-label="Случайное отклонение размера, px"><span>px</span></span><input id="size-deviation-slider" name="sizeDeviation" type="range" min="0" max="1990" step="1"></div>
+          <div class="range-label"><label for="rotation-slider">Вращение</label><span class="range-value"><span>±</span><input id="rotation-out" type="number" data-range="rotation" min="0" max="180" step="1" required aria-label="Вращение, градусы"><span>°</span></span><input id="rotation-slider" name="rotation" type="range" min="0" max="180" step="1"></div>
           <div class="divider"></div>
-          <label class="range-label">Рамка <output id="border-out"></output><input name="border" type="range" min="0" max="60"></label>
-          <label class="range-label">Тень <output id="shadow-out"></output><input name="shadow" type="range" min="0" max="100"></label>
+          <div class="range-label"><label for="border-slider">Рамка</label><span class="range-value"><input id="border-out" type="number" data-range="border" min="0" max="60" step="1" required aria-label="Рамка, px"><span>px</span></span><input id="border-slider" name="border" type="range" min="0" max="60" step="1"></div>
+          <div class="range-label"><label for="shadow-slider">Тень</label><span class="range-value"><input id="shadow-out" type="number" data-range="shadow" min="0" max="100" step="1" required aria-label="Тень, px"><span>px</span></span><input id="shadow-slider" name="shadow" type="range" min="0" max="100"></div>
           <div class="color-row"><label for="background">Цвет фона</label><input id="background" name="background" type="color"></div>
         </form>
         <button id="generate" class="button accent full">✳ Перемешать кадры</button>

@@ -4,7 +4,9 @@ const $ = selector => document.querySelector(selector);
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
 let state, items = [], selected = null, filter = 'active', limit = 80, images = new Map(), undo = [], drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false;
 let savedSettings, settingsSaving = false;
-const numeric = ['rotation', 'scatter', 'border', 'shadow'];
+let photoSizeEditDeviation = null;
+const numeric = ['rotation', 'border', 'shadow'];
+const numberInputs = [...form.querySelectorAll('input[data-range]')];
 async function api(path, data) {
   const response = await fetch(`/api/${path}`, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   const result = await response.json();
@@ -52,12 +54,11 @@ function fillForm() {
 function updateLabels() {
   const size = Number(form.elements.photoSize.value);
   form.elements.sizeDeviation.max = Math.min(size - 20, 4000 - size);
-  $('#photo-size-out').textContent = `${size} px`;
-  $('#size-deviation-out').textContent = `±${form.elements.sizeDeviation.value} px`;
-  $('#border-out').textContent = `${form.elements.border.value} px`;
-  $('#shadow-out').textContent = `${form.elements.shadow.value} px`;
-  $('#rotation-out').textContent = `±${form.elements.rotation.value}°`;
-  $('#scatter-out').textContent = `${form.elements.scatter.value}%`;
+  for (const input of numberInputs) {
+    const range = form.elements[input.dataset.range];
+    input.min = range.min; input.max = range.max; input.step = range.step || '1';
+    input.value = range.value;
+  }
 }
 function fillCoverSizes() {
   const select = $('#preset');
@@ -79,20 +80,24 @@ function updateSettings() {
   state.settings = readSettings();
   updateLabels(); draw(); updateSaveStatus();
 }
-async function loadImages() {
+async function loadImages(generationPhotos) {
   loading = true;
-  const needed = new Set(visibleItems().map(item => item.id));
+  const visible = new Set(visibleItems().map(item => item.id));
+  const photos = generationPhotos ?? available().filter(photo => visible.has(photo.id));
+  const needed = new Set(photos.map(photo => photo.id));
   for (const [id, bitmap] of images) if (!needed.has(id)) { bitmap.close(); images.delete(id); }
-  const photos = available().filter(photo => needed.has(photo.id)); let index = 0;
+  let index = 0;
   const worker = async () => {
     while (index < photos.length) {
       const photo = photos[index++];
-      if (images.has(photo.id)) continue;
+      const cached = images.get(photo.id);
+      if (cached) { photo.width ||= cached.width; photo.height ||= cached.height; continue; }
       try {
         const response = await fetch(photo.src);
         if (!response.ok) throw new Error();
         const blob = await response.blob();
         let bitmap = await createImageBitmap(blob);
+        photo.width = bitmap.width; photo.height = bitmap.height;
         if (Math.max(bitmap.width, bitmap.height) > 1200) {
           const factor = 1200 / Math.max(bitmap.width, bitmap.height);
           const reduced = await createImageBitmap(bitmap, { resizeWidth: Math.round(bitmap.width * factor), resizeHeight: Math.round(bitmap.height * factor), resizeQuality: 'high' });
@@ -193,12 +198,34 @@ async function shuffle() {
   if (loading) throw new Error('Дождитесь загрузки изображений');
   if (!available().length) throw new Error('Сначала добавьте фотографии');
   updateSettings();
-  checkpoint(); items = generate(available(), state.settings); selected = null;
-  await loadImages(); draw(); updateSelection(); renderLibrary();
+  const photos = available();
+  await loadImages(photos);
+  checkpoint(); items = generate(photos.filter(photo => photo.available), state.settings); selected = null;
+  draw(); updateSelection(); renderLibrary();
 }
 form.addEventListener('submit', e => e.preventDefault());
-form.addEventListener('input', action(event => { if (event.target.id !== 'preset') { updateLabels(); updateSettings(); } }));
+form.addEventListener('focusin', event => {
+  if (event.target.dataset.range === 'photoSize') photoSizeEditDeviation = Number(form.elements.sizeDeviation.value);
+});
+form.addEventListener('focusout', event => {
+  if (event.target.dataset.range === 'photoSize') photoSizeEditDeviation = null;
+});
+form.addEventListener('input', action(event => {
+  const input = event.target;
+  if (input.id === 'preset') return;
+  if (input.dataset.range) {
+    if (!input.validity.valid) return;
+    form.elements[input.dataset.range].value = input.value;
+    if (input.dataset.range === 'photoSize' && photoSizeEditDeviation !== null) {
+      const deviation = form.elements.sizeDeviation, size = Number(input.value);
+      deviation.max = Math.min(size - 20, 4000 - size);
+      deviation.value = Math.min(photoSizeEditDeviation, Number(deviation.max));
+    }
+  }
+  updateLabels(); updateSettings();
+}));
 form.addEventListener('change', action(e => {
+  if (e.target.dataset.range && !e.target.reportValidity()) return;
   if (e.target.id === 'preset' && e.target.value === 'custom') {
     fillCoverSizes();
     const sizeForm = $('#size-form');

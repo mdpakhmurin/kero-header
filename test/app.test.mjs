@@ -51,6 +51,7 @@ test('settings and layout reject invalid dimensions and path-like IDs', () => {
   assert.throws(() => validateSettings({ ...defaults, minSize: 999 }));
   assert.throws(() => validateLayout({ items: [{ id: '../../.env', x: 1, y: 1, width: 100, angle: 0 }] }));
   assert.equal(validateSettings({ ...defaults, community: 'https://vk.ru/kero_comics' }).community, 'kero_comics');
+  assert.equal('scatter' in validateSettings({ ...defaults, scatter: 100 }), false);
 });
 
 test('saved cover sizes are validated, deduplicated and include the current dimensions', () => {
@@ -158,10 +159,11 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   const { id } = await (await post('/api/import', { name: 'test.png', data: png.toString('base64') })).json();
   assert.match(id, /^local_/); assert.equal((await fetch(base + '/images/' + id)).headers.get('content-type'), 'image/png');
   const coverSizes = [...defaults.coverSizes, { width: 1600, height: 600 }];
-  const savedSettings = await (await post('/api/settings', { ...defaults, rotation: 50, seed: 42, width: 1600, height: 600, coverSizes })).json();
+  const savedSettings = await (await post('/api/settings', { ...defaults, rotation: 50, seed: 42, scatter: 100, width: 1600, height: 600, coverSizes })).json();
   assert.equal('seed' in savedSettings, false);
   const savedFile = JSON.parse(await readFile(join(root, 'config/settings.json'), 'utf8'));
   assert.equal('seed' in savedFile, false);
+  assert.equal('scatter' in savedSettings, false); assert.equal('scatter' in savedFile, false);
   assert.equal(savedFile.width, 1600); assert.equal(savedFile.height, 600);
   assert.deepEqual(savedFile.coverSizes, coverSizes);
   assert.equal((await post('/api/layout', { items: [{ id, x: 120, y: 80, width: 200, angle: -25 }] })).status, 404);
