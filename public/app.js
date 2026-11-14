@@ -1,4 +1,5 @@
 import { generate, hitTest } from './collage.js';
+import { photoSource } from './library.js';
 const $ = selector => document.querySelector(selector);
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
 let state, items = [], selected = null, filter = 'active', limit = 80, images = new Map(), undo = [], drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false;
@@ -141,15 +142,20 @@ function renderLibrary() {
   const grid = $('#library-grid'); grid.replaceChildren();
   for (const photo of list.slice(0, limit)) {
     const card = document.createElement('div'); card.className = `photo-card${excluded.has(photo.id) ? ' excluded' : ''}${selected === photo.id ? ' selected' : ''}`;
-    const choose = document.createElement('button'); choose.className = 'photo-image'; choose.title = photo.available ? 'Выбрать на холсте или добавить в композицию' : 'Нет файла в кеше: выполните синхронизацию или импортируйте снова'; choose.setAttribute('aria-label', photo.title); choose.disabled = !photo.available || excluded.has(photo.id);
-    if (photo.available) { const img = document.createElement('img'); img.src = photo.src; img.loading = 'lazy'; img.alt = photo.title; choose.append(img); } else choose.textContent = 'Нет файла';
+    const source = photoSource(photo);
+    const preview = document.createElement(source ? 'a' : 'div'); preview.className = 'photo-image';
+    if (source) { preview.href = source.href; preview.target = '_blank'; preview.rel = 'noopener noreferrer'; preview.title = source.label; preview.setAttribute('aria-label', `${source.label}: ${photo.title}`); }
+    else preview.title = 'Нет файла в кеше: импортируйте изображение снова';
+    if (photo.available) { const img = document.createElement('img'); img.src = photo.src; img.loading = 'lazy'; img.alt = photo.title; preview.append(img); } else preview.textContent = 'Нет файла';
+    const choose = document.createElement('button'); choose.className = 'photo-toggle photo-add'; choose.type = 'button'; choose.textContent = '+'; choose.title = 'Выбрать на холсте или добавить в композицию'; choose.setAttribute('aria-label', `${choose.title}: ${photo.title}`); choose.disabled = !photo.available || excluded.has(photo.id);
     choose.onclick = action(async () => {
       if (!items.some(i => i.id === photo.id)) { checkpoint(); items.push({ id: photo.id, x: canvas.width / 2, y: canvas.height / 2, width: state.settings.maxSize, angle: 0 }); await loadImages(); }
       selected = photo.id; draw(); updateSelection(); renderLibrary();
     });
     const toggle = document.createElement('button'); toggle.className = 'photo-toggle'; toggle.textContent = excluded.has(photo.id) ? '↶' : '×'; toggle.title = excluded.has(photo.id) ? 'Вернуть в генерацию' : 'Исключить из будущих генераций'; toggle.setAttribute('aria-label', toggle.title); toggle.onclick = action(() => toggleExclusion(photo.id));
-    const name = document.createElement('span'); name.className = 'photo-name'; name.textContent = photo.title; name.title = photo.title;
-    card.append(choose, toggle, name); grid.append(card);
+    const name = document.createElement(source ? 'a' : 'span'); name.className = 'photo-name'; name.textContent = source ? `${source.label} ↗` : photo.title; name.title = photo.title;
+    if (source) { name.href = source.href; name.target = '_blank'; name.rel = 'noopener noreferrer'; }
+    card.append(preview, choose, toggle, name); grid.append(card);
   }
   $('#load-more').hidden = list.length <= limit;
   $('#library-empty').hidden = list.length > 0;
@@ -196,7 +202,7 @@ canvas.onpointerup = endDrag; canvas.onpointercancel = endDrag;
 canvas.addEventListener('wheel', event => {
   const item = items.find(i => i.id === selected); if (!item) return;
   event.preventDefault(); if (!wheelTimer) checkpoint();
-  if (!event.shiftKey) item.angle = (item.angle + Math.sign(event.deltaY) * 2) % 360;
+  if (!event.shiftKey) item.angle = (item.angle + Math.sign(event.deltaY) * 4) % 360;
   else item.width = Math.max(10, Math.min(10000, item.width * (event.deltaY > 0 ? .95 : 1.05)));
   draw(); updateSelection(); clearTimeout(wheelTimer); wheelTimer = setTimeout(() => { wheelTimer = null; }, 250);
 }, { passive: false });

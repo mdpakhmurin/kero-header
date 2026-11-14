@@ -8,6 +8,7 @@ import { defaults, validateSettings, validateLayout, cacheValid } from '../lib/s
 import { syncLibrary, paginate, wallPhotos, createVK, connectionError } from '../lib/vk.mjs';
 import { createApp } from '../server.mjs';
 import { generate, hitTest } from '../public/collage.js';
+import { photoSource } from '../public/library.js';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64');
 async function fixture(t) { const root = await mkdtemp(join(tmpdir(), 'kero-test-')); t.after(() => rm(root, { recursive: true, force: true })); return root; }
@@ -82,6 +83,40 @@ test('partial VK access retains photos and reports warnings', async t => {
   }, download: async () => png });
   assert.equal(s.downloaded, 1); assert.match(s.warnings[0], /No album access/);
 });
+
+test('VK sources retain post links through deduplication, reposts and album-only sync', async t => {
+  const root = await fixture(t), library = { photos: {} };
+  const call = async method => {
+    if (method === 'utils.resolveScreenName') return { type: 'group', object_id: 123 };
+    if (method === 'photos.getAll') return { count: 2, items: [photo(1), photo(2)] };
+    return { count: 2, items: [
+      { owner_id: -123, id: 10, attachments: [{ type: 'photo', photo: photo(1) }], copy_history: [
+        { owner_id: -456, id: 20, attachments: [{ type: 'photo', photo: photo(3) }] },
+      ] },
+      { owner_id: -123, id: 9, attachments: [{ type: 'photo', photo: photo(1) }] },
+    ] };
+  };
+  const run = async settings => syncLibrary({ root, settings, library, exclusions: [], status: status(), call, download: async () => png });
+  await run(defaults);
+  assert.equal(Object.keys(library.photos).length, 3);
+  assert.equal(library.photos['vk_-123_1'].postPage, 'https://vk.ru/wall-123_10');
+  assert.equal(library.photos['vk_-123_3'].postPage, 'https://vk.ru/wall-456_20');
+  assert.equal(library.photos['vk_-123_2'].page, 'https://vk.ru/photo-123_2');
+  assert.equal(library.photos['vk_-123_2'].postPage, undefined);
+  await run({ ...defaults, source: 'albums' });
+  const saved = JSON.parse(await readFile(join(root, 'cache/library.json'), 'utf8'));
+  assert.equal(saved.photos['vk_-123_1'].postPage, 'https://vk.ru/wall-123_10');
+  assert.equal(photoSource(saved.photos['vk_-123_1']).href, 'https://vk.ru/wall-123_10');
+});
+
+test('library links open VK posts, old VK photos and available local originals', () => {
+  assert.equal(photoSource({ id: 'vk_-123_1', postPage: 'https://vk.ru/wall-123_10' }).href, 'https://vk.ru/wall-123_10');
+  assert.equal(photoSource({ id: 'vk_-123_1', available: false }).href, 'https://vk.ru/photo-123_1');
+  assert.equal(photoSource({ id: 'vk_123_1', postPage: 'javascript:alert(1)' }).href, 'https://vk.ru/photo123_1');
+  const id = `local_${'a'.repeat(64)}`;
+  assert.equal(photoSource({ id, available: true }).href, `/images/${id}`);
+  assert.equal(photoSource({ id, available: false }), null);
+});
 test('VK token is sent in POST body, API errors do not leak it', async () => {
   const call = createVK('secret-fixture', { delay: 0, fetcher: async (url, options) => {
     assert.equal(url, 'https://api.vk.ru/method/photos.getAll');
@@ -104,6 +139,7 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   let base = `http://127.0.0.1:${server.address().port}`;
   const post = (path, value, headers = {}) => fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(value) });
   assert.equal((await fetch(base)).status, 200);
+  assert.equal((await fetch(base + '/library.js')).status, 200);
   assert.equal((await post('/api/settings', defaults, { Origin: 'https://evil.example' })).status, 403);
   assert.equal((await fetch(base + '/.env')).status, 404);
   assert.equal((await post('/api/import', { name: 'x.svg', data: Buffer.from('<svg></svg>').toString('base64') })).status, 400);

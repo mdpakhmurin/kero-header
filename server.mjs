@@ -104,7 +104,7 @@ export async function createApp(root = here, { vkFactory = createVK } = {}) {
         const data = await readFile(join(root, 'cache/images', `${id}.img`));
         res.writeHead(200, { 'Content-Type': library.photos[id].mime || 'application/octet-stream', 'Cache-Control': 'no-cache' }); res.end(data); return;
       }
-      const routes = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/comic.css': ['comic.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'] };
+      const routes = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/comic.css': ['comic.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'], '/library.js': ['library.js', 'text/javascript'] };
       if (!routes[path]) return json(res, 404, { error: 'Не найдено' });
       const [file, type] = routes[path];
       res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-cache' }); res.end(await readFile(join(here, 'public', file)));
