@@ -153,6 +153,7 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   const post = (path, value, headers = {}) => fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(value) });
   assert.equal((await fetch(base)).status, 200);
   assert.equal((await fetch(base + '/library.js')).status, 200);
+  assert.equal((await fetch(base + '/render.js')).status, 200);
   assert.equal((await post('/api/settings', defaults, { Origin: 'https://evil.example' })).status, 403);
   assert.equal((await fetch(base + '/.env')).status, 404);
   assert.equal((await post('/api/import', { name: 'x.svg', data: Buffer.from('<svg></svg>').toString('base64') })).status, 400);

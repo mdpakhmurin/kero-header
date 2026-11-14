@@ -1,7 +1,9 @@
 import { generate, hitTest } from './collage.js';
 import { photoSource } from './library.js';
+import { createPhotoRenderer, previewDimensions, renderDimensions, smooth } from './render.js';
 const $ = selector => document.querySelector(selector);
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
+const preview = document.createElement('canvas'), photoRenderer = createPhotoRenderer();
 let state, items = [], selected = null, filter = 'active', limit = 80, images = new Map(), undo = [], drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false;
 let savedSettings, settingsSaving = false;
 let photoSizeEditDeviation = null;
@@ -85,7 +87,7 @@ async function loadImages(generationPhotos) {
   const visible = new Set(visibleItems().map(item => item.id));
   const photos = generationPhotos ?? available().filter(photo => visible.has(photo.id));
   const needed = new Set(photos.map(photo => photo.id));
-  for (const [id, bitmap] of images) if (!needed.has(id)) { bitmap.close(); images.delete(id); }
+  for (const [id, bitmap] of images) if (!needed.has(id)) { photoRenderer.release(bitmap); bitmap.close(); images.delete(id); }
   let index = 0;
   const worker = async () => {
     while (index < photos.length) {
@@ -119,31 +121,41 @@ async function refresh() {
   if (fresh.sync.error) { const el = $('#sync-status'); el.hidden = false; el.classList.add('error'); el.textContent = syncMessage(fresh.sync); }
   if (fresh.sync.running) pollSync();
 }
-function paint(context, width, height, drawSelection = false, imageMap = images) {
+function paint(context, width, height, drawSelection = false, pixelScale = 1) {
   const s = state.settings;
   context.clearRect(0, 0, width, height); context.fillStyle = s.background; context.fillRect(0, 0, width, height);
   for (const item of visibleItems()) {
-    const image = imageMap.get(item.id); if (!image) continue;
+    const image = images.get(item.id); if (!image) continue;
     const h = item.width * image.height / image.width;
-    context.save(); context.translate(item.x, item.y); context.rotate(item.angle * Math.PI / 180);
-    context.shadowColor = '#15200d42'; context.shadowBlur = s.shadow; context.shadowOffsetY = s.shadow * .3;
-    context.fillStyle = '#fff'; context.fillRect(-item.width / 2 - s.border, -h / 2 - s.border, item.width + s.border * 2, h + s.border * 2);
-    context.shadowColor = 'transparent'; context.drawImage(image, -item.width / 2, -h / 2, item.width, h);
+    photoRenderer.draw(context, item, image, s, pixelScale);
     if (drawSelection && item.id === selected) {
-      const scale = canvas.width / canvas.clientWidth;
+      const scale = width / canvas.clientWidth;
+      context.save(); context.translate(item.x, item.y); context.rotate(item.angle * Math.PI / 180);
       context.strokeStyle = '#86a33e'; context.lineWidth = 2 * scale;
       context.strokeRect(-item.width / 2 - s.border, -h / 2 - s.border, item.width + s.border * 2, h + s.border * 2);
       context.fillStyle = '#d7f578'; const size = 7 * scale;
       for (const x of [-item.width / 2 - s.border, item.width / 2 + s.border]) for (const y of [-h / 2 - s.border, h / 2 + s.border]) context.fillRect(x - size / 2, y - size / 2, size, size);
+      context.restore();
     }
-    context.restore();
   }
 }
 function draw() {
-  canvas.width = state.settings.width; canvas.height = state.settings.height;
-  paint(ctx, canvas.width, canvas.height, true);
+  const s = state.settings;
+  canvas.style.aspectRatio = `${s.width} / ${s.height}`;
+  const displaySize = previewDimensions(canvas.clientWidth || s.width, s.width, s.height, window.devicePixelRatio || 1);
+  const renderSize = renderDimensions(displaySize.width, displaySize.height);
+  if (canvas.width !== displaySize.width) canvas.width = displaySize.width;
+  if (canvas.height !== displaySize.height) canvas.height = displaySize.height;
+  if (preview.width !== renderSize.width) preview.width = renderSize.width;
+  if (preview.height !== renderSize.height) preview.height = renderSize.height;
+  const context = smooth(preview.getContext('2d'));
+  context.setTransform(preview.width / s.width, 0, 0, preview.height / s.height, 0, 0);
+  paint(context, s.width, s.height, true, preview.width / s.width);
+  ctx.setTransform(1, 0, 0, 1, 0, 0); smooth(ctx);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(preview, 0, 0, canvas.width, canvas.height);
   $('#canvas-count').textContent = visibleItems().length;
-  $('#dimensions').textContent = `${canvas.width} × ${canvas.height}`;
+  $('#dimensions').textContent = `${s.width} × ${s.height}`;
   $('#export').disabled = !visibleItems().length || loading;
   $('#undo').disabled = !undo.length;
 }
@@ -172,7 +184,7 @@ function renderLibrary() {
     if (photo.available) { const img = document.createElement('img'); img.src = photo.src; img.loading = 'lazy'; img.alt = photo.title; preview.append(img); } else preview.textContent = 'Нет файла';
     const choose = document.createElement('button'); choose.className = 'photo-toggle photo-add'; choose.type = 'button'; choose.textContent = '+'; choose.title = 'Выбрать на холсте или добавить в композицию'; choose.setAttribute('aria-label', `${choose.title}: ${photo.title}`); choose.disabled = !photo.available || excluded.has(photo.id);
     choose.onclick = action(async () => {
-      if (!items.some(i => i.id === photo.id)) { checkpoint(); items.push({ id: photo.id, x: canvas.width / 2, y: canvas.height / 2, width: state.settings.maxSize, angle: 0 }); await loadImages(); }
+      if (!items.some(i => i.id === photo.id)) { checkpoint(); items.push({ id: photo.id, x: state.settings.width / 2, y: state.settings.height / 2, width: state.settings.maxSize, angle: 0 }); await loadImages(); }
       selected = photo.id; draw(); updateSelection(); renderLibrary();
     });
     const toggle = document.createElement('button'); toggle.className = 'photo-toggle'; toggle.textContent = excluded.has(photo.id) ? '↶' : '×'; toggle.title = excluded.has(photo.id) ? 'Вернуть в генерацию' : 'Исключить из будущих генераций'; toggle.setAttribute('aria-label', toggle.title); toggle.onclick = action(() => toggleExclusion(photo.id));
@@ -270,7 +282,7 @@ $('#size-form').onsubmit = action(event => {
   finally { button.disabled = false; button.textContent = 'Добавить и выбрать'; }
 });
 $('#generate').onclick = action(() => shuffle());
-function point(event) { const rect = canvas.getBoundingClientRect(); return { x: (event.clientX - rect.left) * canvas.width / rect.width, y: (event.clientY - rect.top) * canvas.height / rect.height }; }
+function point(event) { const rect = canvas.getBoundingClientRect(); return { x: (event.clientX - rect.left) * state.settings.width / rect.width, y: (event.clientY - rect.top) * state.settings.height / rect.height }; }
 canvas.onpointerdown = event => {
   if (event.button !== 0) return;
   const p = point(event), item = [...visibleItems()].reverse().find(i => { const image = images.get(i.id); return image && hitTest(i, image.height / image.width, p.x, p.y, state.settings.border); });
@@ -302,26 +314,36 @@ window.addEventListener('keydown', event => {
 });
 $('#export').onclick = action(async () => {
   const button = $('#export'); button.disabled = true; button.textContent = 'Готовим PNG…';
+  let surface, output;
   try {
     await saveQueue;
     const exportItems = structuredClone(visibleItems()), s = structuredClone(state.settings);
     // Export originals one at a time to keep memory bounded, even for a large archive.
-    const output = document.createElement('canvas'); output.width = s.width; output.height = s.height;
-    const context = output.getContext('2d'); context.fillStyle = s.background; context.fillRect(0, 0, output.width, output.height);
+    const size = renderDimensions(s.width, s.height);
+    surface = document.createElement('canvas'); surface.width = size.width; surface.height = size.height;
+    const context = smooth(surface.getContext('2d')), scale = surface.width / s.width;
+    context.setTransform(scale, 0, 0, surface.height / s.height, 0, 0);
+    context.fillStyle = s.background; context.fillRect(0, 0, s.width, s.height);
     for (const item of exportItems) {
       const photo = state.photos.find(p => p.id === item.id), response = await fetch(photo.src);
       if (!response.ok) throw new Error('В кеше отсутствует фото. Синхронизируйте библиотеку перед экспортом.');
       const image = await createImageBitmap(await response.blob());
-      const h = item.width * image.height / image.width;
-      context.save(); context.translate(item.x, item.y); context.rotate(item.angle * Math.PI / 180);
-      context.shadowColor = '#15200d42'; context.shadowBlur = s.shadow; context.shadowOffsetY = s.shadow * .3;
-      context.fillStyle = '#fff'; context.fillRect(-item.width / 2 - s.border, -h / 2 - s.border, item.width + s.border * 2, h + s.border * 2);
-      context.shadowColor = 'transparent'; context.drawImage(image, -item.width / 2, -h / 2, item.width, h); context.restore(); image.close();
+      try { photoRenderer.draw(context, item, image, s, scale); }
+      finally { photoRenderer.release(image); image.close(); }
+    }
+    if (surface.width === s.width && surface.height === s.height) output = surface;
+    else {
+      output = document.createElement('canvas'); output.width = s.width; output.height = s.height;
+      smooth(output.getContext('2d')).drawImage(surface, 0, 0, output.width, output.height);
     }
     const blob = await new Promise(resolve => output.toBlob(resolve, 'image/png'));
     if (!blob) throw new Error('Браузер не смог создать PNG. Попробуйте меньший размер.');
     const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = `kero-header-${Date.now()}-${s.width}x${s.height}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 10000); toast('Обложка готова. PNG передан в загрузки браузера.');
-  } finally { button.disabled = false; button.textContent = 'Скачать PNG ↗'; }
+  } finally {
+    if (output && output !== surface) output.width = output.height = 0;
+    if (surface) surface.width = surface.height = 0;
+    button.disabled = false; button.textContent = 'Скачать PNG ↗';
+  }
 });
 document.querySelectorAll('.filter').forEach(b => b.onclick = () => { filter = b.dataset.filter; limit = 80; renderLibrary(); });
 $('#search').oninput = () => { limit = 80; renderLibrary(); }; $('#load-more').onclick = () => { limit += 80; renderLibrary(); };
@@ -334,7 +356,7 @@ $('#clear-cache').onclick = action(async () => {
     await saveQueue;
     const result = await api('cache/clear', {});
     items = []; undo = []; selected = null; drag = null;
-    for (const bitmap of images.values()) bitmap.close(); images.clear();
+    for (const bitmap of images.values()) { photoRenderer.release(bitmap); bitmap.close(); } images.clear();
     await refresh();
     toast(`Кеш очищен. Удалено файлов: ${result.removed}.`);
   } finally { button.disabled = false; }
