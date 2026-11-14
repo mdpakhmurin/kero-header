@@ -5,11 +5,12 @@ import { fileURLToPath } from 'node:url';
 import { defaults, readJSON, writeJSON, validateSettings, validId, digest, saveImage, imagePath, readImage, migrateImageFiles, migrateLocalDates } from './lib/storage.mjs';
 import { syncLibrary, createVK } from './lib/vk.mjs';
 import { openFolder } from './lib/folder.mjs';
+import { coverCommunity, coverImage, installCover } from './lib/cover.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 try { process.loadEnvFile(join(here, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 
-export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder } = {}) {
+export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder, coverInstaller = installCover } = {}) {
   let settings = validateSettings(await readJSON(join(root, 'config/settings.json'), defaults));
   let exclusions = await readJSON(join(root, 'config/exclusions.json'), []);
   let library = await readJSON(join(root, 'cache/library.json'), { photos: {}, lastSync: null });
@@ -38,6 +39,12 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
     if (req.method === 'GET' && path === '/api/sync') return json(res, 200, sync);
     if (req.method !== 'POST') return json(res, 404, { error: 'Не найдено' });
     const input = await body(req);
+    if (path === '/api/cover') {
+      if (input.confirmed !== true) throw new Error('Подтвердите замену обложки сообщества');
+      if (!token) throw new Error('Добавьте токен VK в настройках подключения. Ему нужен доступ к изменению обложки сообщества.');
+      const community = coverCommunity(input.community), image = coverImage(input.data);
+      return json(res, 200, await coverInstaller({ community, image, call: vkFactory(token) }));
+    }
     if (path === '/api/settings') { const next = validateSettings(input); await writeJSON(join(root, 'config/settings.json'), next); settings = next; return json(res, 200, settings); }
     if (path === '/api/images/open-folder') {
       const directory = join(root, 'cache/images');

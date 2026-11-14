@@ -7,7 +7,7 @@
   </header>
   <main>
     <div class="workspace">
-      <aside class="panel controls">
+      <div class="parameters-slot" id="parameters-panel"><aside class="panel controls">
         <div class="controls-heading"><h1>Параметры</h1></div>
         <form id="settings-form">
           <section class="control-section">
@@ -18,7 +18,7 @@
           <div class="range-label"><label for="photo-size-slider">Размер фотографий</label><span class="range-value"><input id="photo-size-out" type="number" data-range="photoSize" min="20" max="800" step="1" required aria-label="Размер фотографий, px"><span>px</span></span><input id="photo-size-slider" name="photoSize" type="range" min="20" max="800" step="1"></div>
           <div class="range-label"><label for="size-deviation-slider">Отклонение размера</label><span class="range-value"><span>±</span><input id="size-deviation-out" type="number" data-range="sizeDeviation" min="0" max="300" step="1" required aria-label="Отклонение размера, проценты"><span>%</span></span><input id="size-deviation-slider" name="sizeDeviation" type="range" min="0" max="300" step="1"></div>
           <div class="range-label"><label for="rotation-slider">Вращение</label><span class="range-value"><span>±</span><input id="rotation-out" type="number" data-range="rotation" min="0" max="180" step="1" required aria-label="Вращение, градусы"><span>°</span></span><input id="rotation-slider" name="rotation" type="range" min="0" max="180" step="1"></div>
-          <fieldset class="layout-order"><legend>Порядок кадров</legend><label><input type="radio" name="layoutOrder" value="random" checked>Случайно</label><label><input type="radio" name="layoutOrder" value="newest">Сначала новые</label><label><input type="radio" name="layoutOrder" value="oldest">Сначала старые</label></fieldset>
+          <div class="layout-order field-label"><span id="order-label">Порядок кадров</span><input id="layout-order" name="layoutOrder" type="hidden" value="random"><button id="order-trigger" class="preset-trigger" type="button" popovertarget="order-menu" popovertargetaction="toggle" aria-labelledby="order-label order-value" aria-haspopup="listbox" aria-controls="order-menu" aria-expanded="false"><span id="order-value">Случайно</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button><div id="order-menu" class="preset-menu" popover="auto" role="listbox" aria-label="Порядок кадров"><button class="preset-option" type="button" role="option" data-value="random" aria-selected="true">Случайно</button><button class="preset-option" type="button" role="option" data-value="newest" aria-selected="false">Сначала новые</button><button class="preset-option" type="button" role="option" data-value="oldest" aria-selected="false">Сначала старые</button></div></div>
           </section>
           <section class="control-section"><h2>Оформление</h2>
           <div class="range-label"><label for="border-slider">Рамка</label><span class="range-value"><input id="border-out" type="number" data-range="border" min="0" max="60" step="1" required aria-label="Рамка, px"><span>px</span></span><input id="border-slider" name="border" type="range" min="0" max="60" step="1"></div>
@@ -30,9 +30,9 @@
         <button id="generate" class="button accent full">Перемешать кадры</button>
         <button id="clear-canvas" class="button light full" type="button" disabled>Очистить холст</button>
         </div>
-      </aside>
+      </aside></div>
       <section class="editor-area">
-        <div class="panel editor"><div class="editor-top"><div class="document-title"><span>Холст</span><span id="dimensions">1920 × 768</span></div><div class="editor-actions"><button class="icon-button open-library" type="button" data-open-library aria-label="Библиотека" title="Открыть библиотеку"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Zm0 2h18"/></svg></button><div class="history-actions"><button id="undo" class="icon-button" title="Отменить (Ctrl+Z)" aria-label="Отменить" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5 4 9l4 4M4 9h10a5 5 0 0 1 0 10"/></svg></button><button id="redo" class="icon-button" title="Повторить (Ctrl+Shift+Z / Ctrl+Y)" aria-label="Повторить" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 5 4 4-4 4m4-4H10a5 5 0 0 0 0 10"/></svg></button></div><button id="export" class="button dark small">Экспорт PNG</button></div></div>
+        <div class="panel editor"><div class="editor-top"><div class="document-title"><button id="toggle-parameters" class="icon-button" type="button" aria-label="Скрыть параметры" title="Скрыть параметры" aria-controls="parameters-panel" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/><path class="panel-chevron" d="m16 9-3 3 3 3"/></svg></button><span>Холст</span><span id="dimensions">1920 × 768</span></div><div class="editor-actions"><button class="icon-button open-library" type="button" data-open-library aria-label="Библиотека" title="Открыть библиотеку"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Zm0 2h18"/></svg></button><div class="history-actions"><button id="undo" class="icon-button" title="Отменить (Ctrl+Z)" aria-label="Отменить" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5 4 9l4 4M4 9h10a5 5 0 0 1 0 10"/></svg></button><button id="redo" class="icon-button" title="Повторить (Ctrl+Shift+Z / Ctrl+Y)" aria-label="Повторить" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 5 4 4-4 4m4-4H10a5 5 0 0 0 0 10"/></svg></button></div><button id="install-cover" class="button accent small" type="button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4zM4 15l5-5 5 5 3-3 3 3"/><circle cx="15.5" cy="8" r="1"/></svg>Установить обложку</button><button id="export" class="button dark small">Экспорт PNG</button></div></div>
           <div class="canvas-wrap">
             <canvas id="canvas" width="1920" height="768" aria-label="Редактор коллажа. Выбирайте фото мышью или в библиотеке."></canvas>
             <div id="canvas-empty-state" class="canvas-empty-state"><svg viewBox="0 0 32 32" aria-hidden="true"><rect x="5" y="5" width="22" height="22" rx="4"/><path d="m6 23 7-8 5 5 4-4 5 6"/><circle cx="21" cy="11" r="2"/></svg><strong>Здесь начинается обложка</strong><span>Выберите фотографии в библиотеке</span><button class="button accent small" type="button" data-open-library>Выбрать</button></div>
@@ -61,7 +61,6 @@
 
       </section>
     </div>
-    <footer class="app-footer">Kero Header Studio</footer>
   </main>
   <input id="file-input" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
         <dialog id="library-dialog" class="library-dialog" aria-labelledby="library-title"><div class="library-top"><div><h2 id="library-title">Библиотека <span id="library-count">0</span></h2><p class="panel-description">Выберите фотографии для добавления на холст</p></div><div class="library-actions"><button id="library-close" class="icon-button" type="button" aria-label="Закрыть библиотеку" title="Закрыть (Esc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div></div>
@@ -90,6 +89,16 @@
       <div class="dialog-footer"><button type="button" id="cancel-size" class="button light">Отмена</button><button type="submit" class="button accent">Добавить и выбрать</button></div>
     </form>
   </dialog>
+  <dialog id="cover-dialog" aria-labelledby="cover-title"><form id="cover-form">
+    <div class="dialog-heading"><h2 id="cover-title">Установить обложку VK</h2><button id="cover-close" type="button" class="icon-button" aria-label="Закрыть установку обложки"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <p>Эта обложка заменит текущую обложку выбранного сообщества.</p>
+    <div class="cover-preview"><img id="cover-preview" alt="Предпросмотр обложки" draggable="false" hidden><span id="cover-preparing">Готовим обложку…</span></div>
+    <label class="field-label">Ссылка на паблик<input name="community" type="text" placeholder="https://vk.ru/kero_comics" autocomplete="off" required></label>
+    <p class="note">Используется токен из подключения VK. Ему нужен доступ к изменению обложки этого сообщества.</p>
+    <button id="cover-connection" class="text-button" type="button">Настройки подключения VK</button>
+    <div id="cover-error" class="sync-status error" role="alert" hidden></div>
+    <div class="dialog-footer"><button id="cover-cancel" class="button light" type="button">Отмена</button><button id="cover-submit" class="button accent" type="submit" disabled>Установить обложку</button></div>
+  </form></dialog>
   <dialog id="connect-dialog"><form id="connect-form"><div class="dialog-heading"><h2>Подключение VK</h2><button type="button" id="close-dialog" class="icon-button" aria-label="Закрыть">×</button></div><p>Фотографии загружаются через API VK. Нужен токен, которому доступны выбранные методы чтения фото и стены.</p><label class="field-label">Ссылка на сообщество<input name="community" type="url" placeholder="https://vk.ru/kero_comics" required></label><label class="field-label">Откуда брать фото<select name="source"><option value="both">Альбомы и фотографии из постов</option><option value="albums">Только альбомы</option><option value="wall">Только фотографии из постов</option></select></label><label class="field-label">Токен доступа<input name="token" type="password" autocomplete="off" placeholder="Вставьте токен VK"></label><p class="note" id="token-note">Токен хранится только в памяти сервера до его перезапуска. Для постоянного подключения можно задать VK_TOKEN в локальном файле .env.</p><a href="https://dev.vk.com/ru/api/access-token/getting-started" target="_blank" rel="noreferrer">О токенах доступа в документации VK ↗</a><div id="connection-error" class="sync-status error" role="alert" hidden></div><div class="dialog-footer"><button id="forget-token" type="button" class="text-button">Забыть токен</button><button class="button accent" type="submit">Сохранить подключение</button></div></form></dialog>
   <div id="toast" role="status" hidden></div><script type="module" src="/app.js"></script>
 </body></html>

@@ -1,6 +1,6 @@
 import { generateAsync, shuffleSources, manualFrames, hitTest, selectionGeometry, selectionHit, resizeSelection, rotateSelection, floatingPanelPosition } from './collage.js';
 import { photoSource, librarySource, sortLibraryPhotos, selectedLibraryPhotos } from './library.js';
-import { createPhotoRenderer, previewDimensions, renderDimensions, smooth } from './render.js';
+import { createPhotoRenderer, previewDimensions, renderDimensions, fitCanvasSize, smooth } from './render.js';
 import { createHistory, historyShortcut } from './history.js';
 import { emptySpacePercent } from './coverage.js';
 import { createPhotoViewer } from './viewer.js';
@@ -19,6 +19,7 @@ let libraryBusy = false, librarySession = 0, libraryRendered = 0, libraryFrame =
 let state, items = [], selected = null, filter = 'active', limit = 60, images = new Map(), drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false, coverageTimer, coverageKey;
 let savedSettings, settingsSaving = false;
 let generating = false;
+let exporting = false, coverUploading = false, coverPayload = null, coverPreviewUrl, coverSession = 0;
 let historyQueue = Promise.resolve();
 let libraryOrigin = 'vk';
 const librarySort = { vk: { key: 'date', direction: 'desc' }, local: { key: 'area', direction: 'desc' } };
@@ -69,6 +70,11 @@ function fillForm() {
   updateLabels();
 }
 function updateLabels() {
+  const order = form.elements.layoutOrder.value;
+  for (const option of $('#order-menu').querySelectorAll('[role=option]')) {
+    option.setAttribute('aria-selected', String(option.dataset.value === order));
+    if (option.dataset.value === order) $('#order-value').textContent = option.textContent;
+  }
   for (const input of numberInputs) {
     const range = form.elements[input.dataset.range];
     input.min = range.min; input.max = range.max; input.step = range.step || '1';
@@ -147,6 +153,38 @@ $('#preset-menu').onkeydown = event => {
 };
 window.addEventListener('resize', () => closeCoverSizes());
 window.addEventListener('scroll', event => { if (!$('#preset-menu').contains(event.target)) closeCoverSizes(); }, true);
+const orderMenu = $('#order-menu'), orderTrigger = $('#order-trigger');
+function positionOrderMenu() {
+  const rect = orderTrigger.getBoundingClientRect();
+  orderMenu.style.width = `${rect.width}px`;
+  orderMenu.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - rect.width - 8))}px`;
+  orderMenu.style.top = `${Math.max(8, rect.bottom + orderMenu.offsetHeight + 8 <= innerHeight ? rect.bottom + 6 : rect.top - orderMenu.offsetHeight - 6)}px`;
+}
+function closeOrderMenu(focus = false) { orderMenu.hidePopover(); if (focus) orderTrigger.focus({ preventScroll: true }); }
+orderMenu.addEventListener('toggle', event => {
+  orderTrigger.setAttribute('aria-expanded', String(event.newState === 'open'));
+  if (event.newState === 'open') positionOrderMenu();
+});
+orderMenu.querySelectorAll('[role=option]').forEach(option => option.onclick = () => {
+  form.elements.layoutOrder.value = option.dataset.value;
+  closeOrderMenu(true);
+  form.elements.layoutOrder.dispatchEvent(new Event('change', { bubbles: true }));
+});
+orderTrigger.onkeydown = event => {
+  if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+  event.preventDefault(); orderMenu.showPopover(); positionOrderMenu();
+  orderMenu.querySelector('[aria-selected=true]').focus({ preventScroll: true });
+};
+orderMenu.onkeydown = event => {
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeOrderMenu(true); return; }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  const choices = [...orderMenu.querySelectorAll('[role=option]')], index = choices.indexOf(document.activeElement);
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length;
+  choices[next].focus({ preventScroll: true });
+};
+window.addEventListener('resize', () => closeOrderMenu());
+window.addEventListener('scroll', event => { if (!orderMenu.contains(event.target)) closeOrderMenu(); }, true);
 function hasUnsavedSettings() {
   return savedSettings && JSON.stringify(state.settings) !== JSON.stringify(savedSettings);
 }
@@ -230,6 +268,9 @@ function paint(context, width, height, pixelScale = 1) {
 }
 function draw() {
   const s = state.settings;
+  const padding = getComputedStyle(canvasWrap);
+  const fitted = fitCanvasSize(canvasWrap.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight), canvasWrap.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom), s.width, s.height);
+  canvas.style.width = `${fitted.width}px`; canvas.style.height = `${fitted.height}px`;
   canvas.style.aspectRatio = `${s.width} / ${s.height}`;
   const displaySize = previewDimensions(canvas.clientWidth || s.width, s.width, s.height, window.devicePixelRatio || 1);
   const renderSize = renderDimensions(displaySize.width, displaySize.height);
@@ -247,7 +288,7 @@ function draw() {
   $('#canvas-empty-state').hidden = visibleItems().length > 0;
   $('#community-link').href = `https://vk.ru/${encodeURIComponent(s.community)}`;
   $('#dimensions').textContent = `${s.width} × ${s.height}`;
-  $('#export').disabled = !visibleItems().length || loading;
+  $('#export').disabled = $('#install-cover').disabled = !visibleItems().length || loading || generating || exporting;
   $('#clear-canvas').disabled = !items.length || loading || generating;
   $('#undo').disabled = !history.canUndo;
   $('#redo').disabled = !history.canRedo;
@@ -481,7 +522,7 @@ async function shuffle() {
     await new Promise(resolve => setTimeout(resolve, 0));
   } finally {
     generating = false; button.disabled = false; button.removeAttribute('aria-busy'); button.textContent = 'Перемешать кадры';
-    $('.editor-area').inert = form.inert = false; $('#clear-canvas').disabled = !items.length; updateSaveStatus();
+    $('.editor-area').inert = form.inert = false; draw(); updateSaveStatus();
   }
 }
 form.addEventListener('submit', e => e.preventDefault());
@@ -635,12 +676,12 @@ window.addEventListener('keydown', event => {
   if (event.key === 'Delete' && selected) { event.preventDefault(); $('#remove').click(); }
   if (event.key === 'Escape') { selected = null; draw(); updateSelection(); }
 });
-$('#export').onclick = action(async () => {
-  const button = $('#export'); button.disabled = true; button.textContent = 'Готовим PNG…';
+async function renderCoverBlob() {
+  const exportItems = structuredClone(visibleItems()), s = structuredClone(state.settings);
+  if (!exportItems.length) throw new Error('Сначала добавьте фотографии на холст');
   let surface, output;
   try {
     await saveQueue;
-    const exportItems = structuredClone(visibleItems()), s = structuredClone(state.settings);
     // Export originals one at a time to keep memory bounded, even for a large archive.
     const size = renderDimensions(s.width, s.height);
     surface = document.createElement('canvas'); surface.width = size.width; surface.height = size.height;
@@ -661,13 +702,67 @@ $('#export').onclick = action(async () => {
     }
     const blob = await new Promise(resolve => output.toBlob(resolve, 'image/png'));
     if (!blob) throw new Error('Браузер не смог создать PNG. Попробуйте меньший размер.');
-    const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = `kero-header-${Date.now()}-${s.width}x${s.height}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 10000); toast('Обложка готова. PNG передан в загрузки браузера.');
+    return blob;
   } finally {
     if (output && output !== surface) output.width = output.height = 0;
     if (surface) surface.width = surface.height = 0;
-    button.disabled = false; button.textContent = 'Экспорт PNG';
   }
+}
+$('#export').onclick = action(async () => {
+  if (exporting || generating || loading) return;
+  const button = $('#export'), s = state.settings;
+  exporting = true; draw(); button.textContent = 'Готовим PNG…';
+  try {
+    const blob = await renderCoverBlob();
+    const url = URL.createObjectURL(blob), a = document.createElement('a'); a.href = url; a.download = `kero-header-${Date.now()}-${s.width}x${s.height}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 10000); toast('Обложка готова. PNG передан в загрузки браузера.');
+  } finally { exporting = false; button.textContent = 'Экспорт PNG'; draw(); }
 });
+const coverDialog = $('#cover-dialog'), coverForm = $('#cover-form');
+function updateCoverSubmit() { $('#cover-submit').disabled = !coverPayload || !state.hasToken || coverUploading; }
+function showCoverError(message) { $('#cover-error').textContent = message; $('#cover-error').hidden = false; }
+$('#install-cover').onclick = action(async () => {
+  if (exporting || generating || loading) return;
+  const session = ++coverSession;
+  coverPayload = null; $('#cover-error').hidden = true;
+  $('#cover-preview').hidden = true; $('#cover-preparing').hidden = false;
+  coverForm.elements.community.value = `https://vk.ru/${savedSettings.community}`;
+  updateCoverSubmit(); coverDialog.showModal();
+  try {
+    const blob = await renderCoverBlob();
+    if (session !== coverSession || !coverDialog.open) return;
+    if (blob.size > 30_000_000) throw new Error('Обложка больше 30 МБ. Уменьшите размер холста.');
+    const encoded = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result.split(',')[1]); reader.onerror = () => reject(new Error('Не удалось подготовить обложку')); reader.readAsDataURL(blob); });
+    if (session !== coverSession || !coverDialog.open) return;
+    coverPayload = encoded; coverPreviewUrl = URL.createObjectURL(blob);
+    $('#cover-preview').src = coverPreviewUrl; $('#cover-preview').hidden = false;
+    if (!state.hasToken) showCoverError('Добавьте токен в настройках подключения VK, затем подтвердите установку.');
+  } catch (error) { if (session === coverSession && coverDialog.open) showCoverError(error.message); }
+  finally { if (session === coverSession) { $('#cover-preparing').hidden = true; updateCoverSubmit(); } }
+});
+$('#cover-close').onclick = $('#cover-cancel').onclick = () => { if (!coverUploading) coverDialog.close(); };
+$('#cover-connection').onclick = openConnection;
+coverDialog.addEventListener('cancel', event => { if (coverUploading) event.preventDefault(); });
+coverDialog.addEventListener('close', () => {
+  coverSession++; coverPayload = null;
+  if (coverPreviewUrl) URL.revokeObjectURL(coverPreviewUrl);
+  coverPreviewUrl = null; $('#cover-preview').removeAttribute('src');
+});
+coverForm.onsubmit = async event => {
+  event.preventDefault();
+  if (coverUploading || !coverPayload || !coverForm.reportValidity()) return;
+  coverUploading = true; coverDialog.dataset.busy = 'true'; $('#cover-error').hidden = true;
+  for (const element of coverForm.elements) element.disabled = true;
+  $('#cover-submit').textContent = 'Устанавливаем…';
+  try {
+    await api('cover', { community: coverForm.elements.community.value, data: coverPayload, confirmed: true });
+    coverDialog.close(); toast('Обложка сообщества установлена в VK.');
+  } catch (error) { showCoverError(error.message); }
+  finally {
+    coverUploading = false; delete coverDialog.dataset.busy;
+    for (const element of coverForm.elements) element.disabled = false;
+    $('#cover-submit').textContent = 'Установить обложку'; updateCoverSubmit();
+  }
+};
 function changeLibraryView(change) {
   change(); limit = 60; renderLibrary(); $('#library-content').scrollTop = 0;
 }
@@ -739,11 +834,13 @@ $('#connect-form').onsubmit = action(async event => {
     state.settings = { ...state.settings, community: next.community, source: next.source };
     updateSaveStatus();
     if (candidate) { await api('token', { token: candidate }); state.hasToken = true; f.elements.token.value = ''; $('#sync-status').hidden = true; }
-    $('#connect-dialog').close(); renderLibrary(); draw(); toast(candidate ? 'VK подтвердил доступ. Токен сохранён в памяти сервера.' : 'Подключение VK сохранено.');
+    $('#connect-dialog').close(); renderLibrary(); draw(); updateCoverSubmit();
+    if (coverDialog.open && state.hasToken) $('#cover-error').hidden = true;
+    toast(candidate ? 'VK подтвердил доступ. Токен сохранён в памяти сервера.' : 'Подключение VK сохранено.');
   } catch (e) { error.textContent = e.message; error.hidden = false; }
   finally { button.disabled = false; button.textContent = 'Сохранить подключение'; }
 });
-$('#forget-token').onclick = action(async () => { await api('token', { token: '' }); state.hasToken = false; $('#connect-form').elements.token.value = ''; $('#connect-form').elements.token.placeholder = 'Вставьте токен VK'; toast('Токен удалён из памяти сервера. Если он задан в .env, удалите его и там.'); });
+$('#forget-token').onclick = action(async () => { await api('token', { token: '' }); state.hasToken = false; updateCoverSubmit(); $('#connect-form').elements.token.value = ''; $('#connect-form').elements.token.placeholder = 'Вставьте токен VK'; toast('Токен удалён из памяти сервера. Если он задан в .env, удалите его и там.'); });
 $('#sync').onclick = action(async () => { if (!state.hasToken) { openConnection(); return; } await saveQueue; await api('sync', {}); pollSync(); });
 async function pollSync() {
   if (polling) return; polling = true; $('#sync').disabled = true;
@@ -756,9 +853,32 @@ async function pollSync() {
   } catch (e) { report(e); } finally { polling = false; $('#sync').disabled = false; }
 }
 document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('click', event => {
-  if (event.target !== dialog) return;
+  if (event.target !== dialog || dialog.dataset.busy === 'true') return;
   const rect = dialog.getBoundingClientRect();
   if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
 }));
-window.addEventListener('resize', () => state && draw());
+const workspace = $('.workspace'), parametersPanel = $('#parameters-panel'), parametersToggle = $('#toggle-parameters');
+function setParametersHidden(hidden) {
+  closeCoverSizes(); closeOrderMenu();
+  if (hidden && parametersPanel.contains(document.activeElement)) parametersToggle.focus({ preventScroll: true });
+  workspace.classList.toggle('parameters-hidden', hidden); parametersPanel.inert = hidden;
+  parametersPanel.setAttribute('aria-hidden', String(hidden));
+  parametersToggle.setAttribute('aria-expanded', String(!hidden));
+  parametersToggle.title = hidden ? 'Показать параметры' : 'Скрыть параметры';
+  parametersToggle.setAttribute('aria-label', parametersToggle.title);
+  try { localStorage.setItem('kero.parametersHidden', String(hidden)); } catch {}
+}
+parametersToggle.onclick = () => setParametersHidden(!workspace.classList.contains('parameters-hidden'));
+try { setParametersHidden(localStorage.getItem('kero.parametersHidden') === 'true'); } catch {}
+let resizeFrame;
+function schedulePreviewResize() {
+  cancelAnimationFrame(resizeFrame);
+  resizeFrame = requestAnimationFrame(() => {
+    workspace.style.setProperty('--editor-toolbar-height', `${$('.editor-top').offsetHeight}px`);
+    if (state) draw();
+  });
+}
+const editorResizeObserver = new ResizeObserver(schedulePreviewResize);
+editorResizeObserver.observe(canvasWrap); editorResizeObserver.observe($('.editor-top'));
+window.addEventListener('resize', schedulePreviewResize);
 await refresh().catch(report);

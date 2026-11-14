@@ -16,6 +16,25 @@ async function fixture(t) { const root = await mkdtemp(join(tmpdir(), 'kero-test
 const status = () => ({ done: 0, total: 0, downloaded: 0, cached: 0, skipped: 0, failed: 0, warnings: [] });
 const photo = id => ({ owner_id: -123, id, sizes: [{ width: 100, height: 100, url: `https://example.com/${id}.png` }] });
 
+test('saved layout order survives a server restart with the rest of the settings', async t => {
+  const root = await fixture(t);
+  for (const layoutOrder of ['newest', 'oldest', 'random']) {
+    let server = await createApp(root);
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    let base = `http://127.0.0.1:${server.address().port}`;
+    const response = await fetch(`${base}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...defaults, layoutOrder, photoSize: 400 }) });
+    assert.equal(response.status, 200);
+    await new Promise(resolve => server.close(resolve));
+    server = await createApp(root);
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      base = `http://127.0.0.1:${server.address().port}`;
+      const settings = (await (await fetch(`${base}/api/state`)).json()).settings;
+      assert.equal(settings.layoutOrder, layoutOrder); assert.equal(settings.photoSize, 400);
+    } finally { await new Promise(resolve => server.close(resolve)); }
+  }
+});
+
 test('file deletion is scoped to the selected source and VK community', async t => {
   const root = await fixture(t), localId = `local_${digest(png)}`, vkId = 'vk_-123_1', otherId = 'vk_-456_2';
   const photos = {};

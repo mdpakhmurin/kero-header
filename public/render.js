@@ -17,6 +17,11 @@ export function previewDimensions(cssWidth, width, height, pixelRatio = 1) {
   return { width: pixels, height: Math.max(1, Math.round(pixels * height / width)) };
 }
 
+export function fitCanvasSize(availableWidth, availableHeight, width, height) {
+  const scale = Math.min(Math.max(1, availableWidth) / width, Math.max(1, availableHeight) / height);
+  return { width: width * scale, height: height * scale };
+}
+
 export function createPhotoRenderer() {
   const mipmaps = new WeakMap();
   function sample(image, targetWidth, targetHeight) {

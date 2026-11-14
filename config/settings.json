@@ -1,6 +1,7 @@
 {
   "community": "kero_comics",
   "source": "both",
+  "layoutOrder": "newest",
   "width": 1920,
   "height": 768,
   "coverSizes": [
