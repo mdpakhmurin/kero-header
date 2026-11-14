@@ -6,8 +6,7 @@
     <div class="workspace">
       <aside class="panel controls">
         <form id="settings-form">
-          <label class="field-label">Размер обложки <select id="preset"><option value="1920,768">1920 × 768</option><option value="1590,400">1590 × 400</option><option value="custom">Свой размер</option></select></label>
-          <div class="pair"><label>Ширина<input name="width" type="number" min="100" max="8192"></label><span>×</span><label>Высота<input name="height" type="number" min="100" max="8192"></label></div>
+          <label class="field-label">Размер обложки <select id="preset"><option value="1920,768">1920 × 768</option><option value="1590,400">1590 × 400</option><option value="custom">＋ Добавить размер…</option></select></label>
           <div class="divider"></div>
           <label class="range-label">Размер фотографий <output id="photo-size-out"></output><input name="photoSize" type="range" min="20" max="800" step="1"></label>
           <label class="range-label">Случайное отклонение размера <output id="size-deviation-out"></output><input name="sizeDeviation" type="range" min="0" max="1990" step="1"></label>
@@ -36,6 +35,15 @@
     <footer><span class="footer-signature">Ке’Ро</span></footer>
   </main>
   <input id="file-input" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+  <dialog id="size-dialog" aria-labelledby="size-dialog-title">
+    <form id="size-form">
+      <div class="dialog-heading"><h2 id="size-dialog-title">Новый размер обложки</h2><button type="button" id="close-size-dialog" class="icon-button" aria-label="Закрыть настройку размера">×</button></div>
+      <p>Добавьте размер в список. После сохранения он сразу применится к обложке.</p>
+      <div class="pair"><label>Ширина, px<input name="width" type="number" min="100" max="8192" step="1" required></label><span>×</span><label>Высота, px<input name="height" type="number" min="100" max="8192" step="1" required></label></div>
+      <div id="size-error" class="sync-status error" role="alert" hidden></div>
+      <div class="dialog-footer"><button type="button" id="cancel-size" class="button light">Отмена</button><button type="submit" class="button accent">Добавить и выбрать</button></div>
+    </form>
+  </dialog>
   <dialog id="connect-dialog"><form id="connect-form"><div class="dialog-heading"><h2>Подключение VK</h2><button type="button" id="close-dialog" class="icon-button" aria-label="Закрыть">×</button></div><p>Фотографии загружаются через API VK. Нужен токен, которому доступны выбранные методы чтения фото и стены.</p><label class="field-label">Ссылка на сообщество<input name="community" type="url" placeholder="https://vk.ru/kero_comics" required></label><label class="field-label">Откуда брать фото<select name="source"><option value="both">Альбомы и фотографии из постов</option><option value="albums">Только альбомы</option><option value="wall">Только фотографии из постов</option></select></label><label class="field-label">Токен доступа<input name="token" type="password" autocomplete="off" placeholder="Вставьте токен VK"></label><p class="note" id="token-note">Токен хранится только в памяти сервера до его перезапуска. Для постоянного подключения можно задать VK_TOKEN в локальном файле .env.</p><a href="https://dev.vk.com/ru/api/access-token/getting-started" target="_blank" rel="noreferrer">О токенах доступа в документации VK ↗</a><div id="connection-error" class="sync-status error" role="alert" hidden></div><div class="dialog-footer"><button id="forget-token" type="button" class="text-button">Забыть токен</button><button class="button accent" type="submit">Сохранить подключение</button></div></form></dialog>
   <div id="toast" role="status" hidden></div><script type="module" src="/app.js"></script>
 </body></html>

@@ -3,7 +3,7 @@ import { photoSource } from './library.js';
 const $ = selector => document.querySelector(selector);
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
 let state, items = [], selected = null, filter = 'active', limit = 80, images = new Map(), undo = [], drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false;
-const numeric = ['width', 'height', 'rotation', 'scatter', 'border', 'shadow'];
+const numeric = ['rotation', 'scatter', 'border', 'shadow'];
 async function api(path, data) {
   const response = await fetch(`/api/${path}`, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   const result = await response.json();
@@ -28,6 +28,7 @@ function available() { return state.photos.filter(p => p.available && !state.exc
 function visibleItems() { const ids = new Set(available().map(p => p.id)); return items.filter(i => ids.has(i.id)); }
 function readSettings() {
   const next = { ...state.settings };
+  [next.width, next.height] = $('#preset').value.split(',').map(Number);
   for (const name of numeric) next[name] = Number(form.elements[name].value);
   const size = Number(form.elements.photoSize.value), deviation = Number(form.elements.sizeDeviation.value);
   next.minSize = size - deviation;
@@ -40,6 +41,7 @@ function readSettings() {
   return next;
 }
 function fillForm() {
+  fillCoverSizes();
   for (const [name, value] of Object.entries(state.settings)) if (form.elements[name]) form.elements[name].value = value;
   form.elements.photoSize.value = Math.round((state.settings.minSize + state.settings.maxSize) / 2);
   form.elements.sizeDeviation.max = 1990;
@@ -55,13 +57,17 @@ function updateLabels() {
   $('#shadow-out').textContent = `${form.elements.shadow.value} px`;
   $('#rotation-out').textContent = `±${form.elements.rotation.value}°`;
   $('#scatter-out').textContent = `${form.elements.scatter.value}%`;
-  const preset = `${form.elements.width.value},${form.elements.height.value}`;
-  $('#preset').value = ['1920,768', '1590,400'].includes(preset) ? preset : 'custom';
+}
+function fillCoverSizes() {
+  const select = $('#preset');
+  select.replaceChildren();
+  for (const size of state.settings.coverSizes) select.add(new Option(`${size.width} × ${size.height}`, `${size.width},${size.height}`));
+  select.add(new Option('＋ Добавить размер…', 'custom'));
+  select.value = `${state.settings.width},${state.settings.height}`;
 }
 async function updateSettings() {
   const next = readSettings();
-  await save('settings', next);
-  state.settings = next;
+  state.settings = await save('settings', next);
   updateLabels(); draw();
 }
 async function loadImages() {
@@ -181,12 +187,37 @@ async function shuffle() {
 form.addEventListener('submit', e => e.preventDefault());
 form.addEventListener('input', event => { if (event.target.id !== 'preset') updateLabels(); });
 form.addEventListener('change', action(async e => {
-  if (e.target.id === 'preset') {
-    if (e.target.value === 'custom') return;
-    [form.elements.width.value, form.elements.height.value] = e.target.value.split(',');
+  if (e.target.id === 'preset' && e.target.value === 'custom') {
+    fillCoverSizes();
+    const sizeForm = $('#size-form');
+    sizeForm.elements.width.value = state.settings.width;
+    sizeForm.elements.height.value = state.settings.height;
+    sizeForm.elements.height.setCustomValidity('');
+    $('#size-error').hidden = true;
+    $('#size-dialog').showModal();
+    sizeForm.elements.width.select();
+    return;
   }
   await updateSettings();
 }));
+$('#close-size-dialog').onclick = $('#cancel-size').onclick = () => $('#size-dialog').close();
+$('#size-form').oninput = event => {
+  const sizeForm = event.currentTarget;
+  sizeForm.elements.height.setCustomValidity(Number(sizeForm.elements.width.value) * Number(sizeForm.elements.height.value) > 32_000_000 ? 'Холст не должен превышать 32 мегапикселя' : '');
+};
+$('#size-form').onsubmit = action(async event => {
+  event.preventDefault();
+  const sizeForm = event.currentTarget, button = sizeForm.querySelector('button[type="submit"]'), error = $('#size-error');
+  const size = { width: Number(sizeForm.elements.width.value), height: Number(sizeForm.elements.height.value) };
+  const coverSizes = state.settings.coverSizes.some(saved => saved.width === size.width && saved.height === size.height) ? state.settings.coverSizes : [...state.settings.coverSizes, size];
+  button.disabled = true; button.textContent = 'Сохраняем…'; error.hidden = true;
+  try {
+    state.settings = await save('settings', { ...readSettings(), ...size, coverSizes });
+    fillCoverSizes(); updateLabels(); draw();
+    $('#size-dialog').close(); toast('Размер обложки сохранён и выбран.');
+  } catch (e) { error.textContent = e.message; error.hidden = false; }
+  finally { button.disabled = false; button.textContent = 'Добавить и выбрать'; }
+});
 $('#generate').onclick = action(() => shuffle());
 function point(event) { const rect = canvas.getBoundingClientRect(); return { x: (event.clientX - rect.left) * canvas.width / rect.width, y: (event.clientY - rect.top) * canvas.height / rect.height }; }
 canvas.onpointerdown = event => {
@@ -213,7 +244,7 @@ $('#remove').onclick = action(() => editSelected(item => { items = items.filter(
 $('#exclude-selected').onclick = action(() => selected && toggleExclusion(selected));
 $('#undo').onclick = action(async () => { if (!undo.length) return; items = undo.pop(); selected = null; await loadImages(); draw(); updateSelection(); });
 window.addEventListener('keydown', event => {
-  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName) || $('#connect-dialog').open) return;
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName) || $('#connect-dialog').open || $('#size-dialog').open) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); $('#undo').click(); }
   if (event.key === 'Delete' && selected) { event.preventDefault(); $('#remove').click(); }
   if (event.key === 'Escape') { selected = null; draw(); updateSelection(); }

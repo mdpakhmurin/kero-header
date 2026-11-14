@@ -52,6 +52,18 @@ test('settings and layout reject invalid dimensions and path-like IDs', () => {
   assert.throws(() => validateLayout({ items: [{ id: '../../.env', x: 1, y: 1, width: 100, angle: 0 }] }));
   assert.equal(validateSettings({ ...defaults, community: 'https://vk.ru/kero_comics' }).community, 'kero_comics');
 });
+
+test('saved cover sizes are validated, deduplicated and include the current dimensions', () => {
+  const migrated = validateSettings({ width: 1200, height: 500 });
+  assert.deepEqual(migrated.coverSizes, [...defaults.coverSizes, { width: 1200, height: 500 }]);
+  const settings = validateSettings({ ...defaults, coverSizes: [...defaults.coverSizes, defaults.coverSizes[0]] });
+  assert.deepEqual(settings.coverSizes, defaults.coverSizes);
+  for (const size of [{ width: 0, height: 400 }, { width: 1200.5, height: 500 }, { width: 8192, height: 8192 }, null]) {
+    assert.throws(() => validateSettings({ ...defaults, coverSizes: [size] }), /размер обложки/);
+  }
+  assert.throws(() => validateSettings({ ...defaults, coverSizes: '1200x500' }));
+  assert.throws(() => validateSettings({ ...defaults, coverSizes: Array(101).fill(defaults.coverSizes[0]) }));
+});
 test('pagination continues across pages; repost attachments are included', async () => {
   const offsets = [], result = [];
   await paginate(async (_, args) => { offsets.push(args.offset); return { count: 5, items: Array.from({ length: Math.min(2, 5 - args.offset) }, (_, i) => i + args.offset) }; }, 'photos.getAll', {}, 2, items => result.push(...items));
@@ -145,9 +157,13 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   assert.equal((await post('/api/import', { name: 'x.svg', data: Buffer.from('<svg></svg>').toString('base64') })).status, 400);
   const { id } = await (await post('/api/import', { name: 'test.png', data: png.toString('base64') })).json();
   assert.match(id, /^local_/); assert.equal((await fetch(base + '/images/' + id)).headers.get('content-type'), 'image/png');
-  const savedSettings = await (await post('/api/settings', { ...defaults, rotation: 50, seed: 42 })).json();
+  const coverSizes = [...defaults.coverSizes, { width: 1600, height: 600 }];
+  const savedSettings = await (await post('/api/settings', { ...defaults, rotation: 50, seed: 42, width: 1600, height: 600, coverSizes })).json();
   assert.equal('seed' in savedSettings, false);
-  assert.equal('seed' in JSON.parse(await readFile(join(root, 'config/settings.json'), 'utf8')), false);
+  const savedFile = JSON.parse(await readFile(join(root, 'config/settings.json'), 'utf8'));
+  assert.equal('seed' in savedFile, false);
+  assert.equal(savedFile.width, 1600); assert.equal(savedFile.height, 600);
+  assert.deepEqual(savedFile.coverSizes, coverSizes);
   assert.equal((await post('/api/layout', { items: [{ id, x: 120, y: 80, width: 200, angle: -25 }] })).status, 404);
   await assert.rejects(readFile(join(root, 'config/layout.json')), { code: 'ENOENT' });
   await post('/api/exclusions', [id]);
@@ -167,6 +183,11 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${server.address().port}`;
   state = await (await fetch(base + '/api/state')).json();
   assert.equal(state.settings.rotation, 50); assert.equal('seed' in state.settings, false); assert.equal('layout' in state, false); assert.deepEqual(state.exclusions, [id]);
+  assert.equal(state.settings.width, 1600); assert.equal(state.settings.height, 600);
+  assert.deepEqual(state.settings.coverSizes, coverSizes);
+  const invalidSize = await post('/api/settings', { ...state.settings, coverSizes: [{ width: 8192, height: 8192 }] });
+  assert.equal(invalidSize.status, 400);
+  assert.deepEqual(JSON.parse(await readFile(join(root, 'config/settings.json'), 'utf8')).coverSizes, coverSizes);
   await writeFile(join(root, 'cache/images/keep.txt'), 'unrelated file');
   assert.equal((await post('/api/cache/clear', {}, { Origin: 'https://evil.example' })).status, 403);
   assert.equal((await (await post('/api/cache/clear', {})).json()).removed, 1);

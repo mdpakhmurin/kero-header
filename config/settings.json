@@ -3,12 +3,22 @@
   "source": "both",
   "width": 1920,
   "height": 768,
+  "coverSizes": [
+    {
+      "width": 1920,
+      "height": 768
+    },
+    {
+      "width": 1590,
+      "height": 400
+    }
+  ],
   "minSize": 211,
   "maxSize": 211,
   "rotation": 38,
   "scatter": 100,
   "count": 0,
   "background": "#e3e1de",
-  "border": 4,
+  "border": 0,
   "shadow": 33
 }
