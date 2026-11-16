@@ -14,7 +14,7 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
   const strip = dialog.querySelector('#viewer-strip'), position = dialog.querySelector('#viewer-position');
   const previous = dialog.querySelector('#viewer-previous'), next = dialog.querySelector('#viewer-next');
   const source = dialog.querySelector('#viewer-source');
-  const add = dialog.querySelector('#viewer-add'), addLabel = dialog.querySelector('#viewer-add-label');
+  const add = dialog.querySelector('#viewer-add');
   const wrap = dialog.querySelector('.viewer-image-wrap'), zoomOut = dialog.querySelector('#viewer-zoom-out'), zoomIn = dialog.querySelector('#viewer-zoom-in');
   const zoomPercent = dialog.querySelector('#viewer-zoom-percent'), fitButton = dialog.querySelector('#viewer-fit');
   const zoomControls = [zoomOut, zoomIn, zoomPercent, fitButton];
@@ -25,7 +25,9 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
     const photo = photos[index];
     add.hidden = typeof onAdd !== 'function';
     add.disabled = adding || !photo || !canAdd(photo);
-    addLabel.textContent = adding ? 'Добавляем…' : photo?.id === addedPhoto ? 'Добавить ещё' : 'Добавить';
+    add.title = adding ? 'Добавляем фото…' : photo?.id === addedPhoto ? 'Добавить ещё копию на холст' : 'Добавить фото на холст';
+    add.setAttribute('aria-label', add.title);
+    add.setAttribute('aria-busy', String(adding));
   }
   add.onclick = async () => {
     const photo = photos[index];

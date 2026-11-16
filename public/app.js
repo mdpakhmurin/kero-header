@@ -11,7 +11,10 @@ const canvasWrap = $('.canvas-wrap'), selectionPanel = $('#selection-panel'), se
 const history = createHistory();
 const photoViewer = createPhotoViewer($('#photo-viewer'), {
   canAdd: photo => !loading && !generating && selectedLibraryPhotos([photo.id], state.photos, state.exclusions, state.settings.community).length > 0,
-  onAdd: photo => addPhotosToCanvas([photo.id]),
+  onAdd: photo => {
+    $('#photo-viewer').close(); libraryDialog.close();
+    return addPhotosToCanvas([photo.id]);
+  },
   onError: report,
 });
 const libraryDialog = $('#library-dialog'), libraryChosen = new Set();
@@ -22,7 +25,7 @@ let generating = false;
 let exporting = false, coverUploading = false, coverPayload = null, coverPreviewUrl, coverSession = 0;
 let historyQueue = Promise.resolve();
 let libraryOrigin = 'vk';
-const librarySort = { vk: { key: 'date', direction: 'desc' }, local: { key: 'area', direction: 'desc' } };
+const librarySort = { vk: { key: 'date', direction: 'desc' }, local: { key: 'ratio', direction: 'desc' } };
 const librarySizes = new Map();
 const numeric = ['rotation', 'border', 'shadow'];
 const numberInputs = [...form.querySelectorAll('input[data-range]')];
@@ -45,7 +48,10 @@ function save(path, value) {
   result.catch(error => report(new Error(`Не удалось сохранить изменения: ${error.message}`)));
   return result;
 }
-function checkpoint() { clearTimeout(wheelTimer); wheelTimer = null; history.checkpoint(items); $('#undo').disabled = !history.canUndo; $('#redo').disabled = !history.canRedo; }
+function checkpoint() {
+  clearTimeout(wheelTimer); wheelTimer = null; history.checkpoint(items);
+  if (!generating) { $('#undo').disabled = !history.canUndo; $('#redo').disabled = !history.canRedo; }
+}
 function selectedItem() { return items.find(item => item.instanceId === selected); }
 function available() { return state.photos.filter(p => p.available && !state.exclusions.includes(p.id) && (p.source === 'local' || p.community === state.settings.community)); }
 function visibleItems() { const ids = new Set(available().map(p => p.id)); return items.filter(i => ids.has(i.id)); }
@@ -104,7 +110,8 @@ function openCoverSizes() {
   $('#preset-menu').showPopover(); positionCoverSizes();
 }
 function coverSizeLabel(size) {
-  return `${size.width} × ${size.height}${size.width === 1920 && size.height === 768 ? ' (Обложка VK)' : ''}`;
+  const name = size.width === 1920 && size.height === 768 ? 'VK' : size.width === 1400 && size.height === 280 ? 'Пикабу' : '';
+  return `${size.width} × ${size.height}${name ? ` (${name})` : ''}`;
 }
 function fillCoverSizes() {
   const input = $('#preset'), menu = $('#preset-menu');
@@ -202,7 +209,9 @@ async function loadImages(generationPhotos, onProgress) {
   const visible = new Set(visibleItems().map(item => item.id));
   const photos = generationPhotos ?? available().filter(photo => visible.has(photo.id));
   const needed = new Set(photos.map(photo => photo.id));
-  for (const [id, bitmap] of images) if (!needed.has(id)) { photoRenderer.release(bitmap); bitmap.close(); images.delete(id); }
+  // Keep decoded previews for the next undo/redo, including a temporarily empty canvas.
+  const retained = history.nearbyPhotoIds();
+  for (const [id, bitmap] of images) if (!needed.has(id) && !retained.has(id)) { photoRenderer.release(bitmap); bitmap.close(); images.delete(id); }
   let index = 0, completed = 0;
   const worker = async () => {
     while (index < photos.length) {
@@ -288,10 +297,12 @@ function draw() {
   $('#canvas-empty-state').hidden = visibleItems().length > 0;
   $('#community-link').href = `https://vk.ru/${encodeURIComponent(s.community)}`;
   $('#dimensions').textContent = `${s.width} × ${s.height}`;
-  $('#export').disabled = $('#install-cover').disabled = !visibleItems().length || loading || generating || exporting;
-  $('#clear-canvas').disabled = !items.length || loading || generating;
-  $('#undo').disabled = !history.canUndo;
-  $('#redo').disabled = !history.canRedo;
+  if (!generating) {
+    $('#export').disabled = $('#install-cover').disabled = !visibleItems().length || loading || exporting;
+    $('#clear-canvas').disabled = !items.length || loading;
+    $('#undo').disabled = !history.canUndo;
+    $('#redo').disabled = !history.canRedo;
+  }
   const visible = visibleItems();
   const key = JSON.stringify([s.width, s.height, s.border, visible.map(item => [item.id, item.x, item.y, item.width, item.angle, images.get(item.id)?.width, images.get(item.id)?.height])]);
   if (key !== coverageKey) {
@@ -339,6 +350,7 @@ function photoIcon(name) {
   svg.innerHTML = paths[name]; return svg;
 }
 function renderLibrary({ append = false } = {}) {
+  if (!libraryDialog.open) return;
   if (!append && libraryFrame !== null) { cancelAnimationFrame(libraryFrame); libraryFrame = null; }
   const knownSelection = new Set([...state.photos.map(photo => photo.id), ...state.exclusions]);
   for (const id of libraryChosen) if (!knownSelection.has(id)) libraryChosen.delete(id);
@@ -351,7 +363,7 @@ function renderLibrary({ append = false } = {}) {
   $('#active-label').textContent = libraryOrigin === 'local' ? 'Добавленные' : 'Доступные';
   $('#active-count').textContent = pool.filter(p => !excluded.has(p.id) && (libraryOrigin === 'local' || p.available)).length;
   $('[data-filter=missing]').hidden = libraryOrigin === 'local';
-  $('#delete-files').title = libraryOrigin === 'vk' ? 'Удалить файлы из VK' : 'Удалить файлы, добавленные с компьютера';
+  $('#delete-files').title = libraryOrigin === 'vk' ? 'Очистить файлы из VK' : 'Очистить файлы, добавленные с компьютера';
   $('#missing-label').textContent = libraryOrigin === 'local' ? 'Нет файла' : 'Нет в кеше';
   $('#missing-label').parentElement.title = libraryOrigin === 'local' ? 'Копия файла в проекте отсутствует. Импортируйте фотографию снова.' : 'Скачанный файл отсутствует. Повторите синхронизацию VK.';
   $('#missing-count').textContent = pool.filter(p => !p.available && !excluded.has(p.id)).length;
@@ -364,9 +376,9 @@ function renderLibrary({ append = false } = {}) {
     const active = button.dataset.sort === order.key;
     button.classList.toggle('active', active); button.classList.toggle('ascending', active && order.direction === 'asc');
     button.setAttribute('aria-pressed', String(active));
-    const label = button.dataset.sort === 'date' ? (libraryOrigin === 'vk' ? 'По дате VK' : 'По добавлению') : 'По размеру (px)';
+    const label = button.dataset.sort === 'date' ? (libraryOrigin === 'vk' ? 'По дате VK' : 'По дате') : 'Пропорции';
     button.querySelector('span').textContent = label;
-    const direction = button.dataset.sort === 'date' ? (order.direction === 'desc' ? 'сначала новые' : 'сначала старые') : (order.direction === 'desc' ? 'сначала крупные' : 'сначала мелкие');
+    const direction = button.dataset.sort === 'date' ? (order.direction === 'desc' ? 'сначала новые' : 'сначала старые') : (order.direction === 'desc' ? 'сначала широкие' : 'сначала узкие');
     button.title = active ? `${label}: ${direction}. Нажмите, чтобы изменить направление.` : label;
     button.setAttribute('aria-label', button.title);
   });
@@ -497,7 +509,11 @@ async function toggleExclusion(id) {
   toast(restoring ? 'Кадр снова участвует в генерации' : 'Кадр исключён. Вернуть его можно во вкладке «Исключённые».');
 }
 function generationProgress(value, message) {
-  $('#generate').textContent = `Перемешиваем… ${Math.round(value)}%`;
+  const percent = Math.max(0, Math.min(100, value));
+  $('#generation-progress').classList.add('active'); $('#generation-progress').setAttribute('aria-hidden', 'false');
+  $('#generation-stage').textContent = message;
+  $('#generation-percent').textContent = `${Math.round(percent)}%`;
+  $('#generation-bar').value = percent;
 }
 async function shuffle() {
   if (generating) return;
@@ -505,8 +521,9 @@ async function shuffle() {
   if (!available().length) throw new Error('Сначала добавьте фотографии');
   updateSettings();
   generating = true;
-  const button = $('#generate'); button.disabled = true; $('#clear-canvas').disabled = true; button.setAttribute('aria-busy', 'true');
-  $('.editor-area').inert = form.inert = true; $('#save-settings').disabled = true;
+  const button = $('#generate'); button.setAttribute('aria-busy', 'true');
+  // Lock interaction without swapping every button into its faded disabled appearance.
+  $('.editor-top').inert = canvasWrap.inert = form.inert = $('.controls-footer').inert = true;
   try {
     generationProgress(0, 'Подготовка фотографий');
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -521,8 +538,8 @@ async function shuffle() {
     draw(); renderLibrary(); generationProgress(100, 'Готово');
     await new Promise(resolve => setTimeout(resolve, 0));
   } finally {
-    generating = false; button.disabled = false; button.removeAttribute('aria-busy'); button.textContent = 'Перемешать кадры';
-    $('.editor-area').inert = form.inert = false; draw(); updateSaveStatus();
+    generating = false; button.removeAttribute('aria-busy'); $('#generation-progress').classList.remove('active'); $('#generation-progress').setAttribute('aria-hidden', 'true');
+    $('.editor-top').inert = canvasWrap.inert = form.inert = $('.controls-footer').inert = false; draw(); updateSaveStatus();
   }
 }
 form.addEventListener('submit', e => e.preventDefault());
@@ -780,11 +797,11 @@ $('#import').onclick = () => $('#file-input').click();
 $('#delete-files').onclick = action(async () => {
   if (loading || generating) throw new Error('Дождитесь завершения текущей операции');
   const source = libraryOrigin;
-  const title = source === 'vk' ? 'Удалить файлы из VK?' : 'Удалить добавленные файлы?';
+  const title = source === 'vk' ? 'Очистить файлы из VK?' : 'Очистить добавленные файлы?';
   const description = source === 'vk'
-    ? 'Будут удалены скачанные файлы текущего сообщества VK, включая исключённые. Их можно скачать повторной синхронизацией. Фотографии с компьютера останутся.'
-    : 'Все добавленные с компьютера фотографии, включая исключённые, будут удалены из библиотеки проекта. Исходные файлы на компьютере и фотографии из VK останутся.';
-  if (!await confirmAction({ title, description, label: 'Удалить файлы' })) return;
+    ? 'Будут удалены скачанные файлы VK, включая исключённые'
+    : 'Все добавленные с компьютера фотографии, включая исключённые, будут удалены из библиотеки проекта.';
+  if (!await confirmAction({ title, description, label: 'Очистить файлы' })) return;
   const button = $('#delete-files'); button.disabled = true;
   try {
     await saveQueue;
@@ -857,18 +874,18 @@ document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('c
   const rect = dialog.getBoundingClientRect();
   if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
 }));
-const workspace = $('.workspace'), parametersPanel = $('#parameters-panel'), parametersToggle = $('#toggle-parameters');
+const workspace = $('.workspace'), parametersPanel = $('#parameters-panel'), parametersContent = $('#parameters-content'), parametersToggle = $('#toggle-parameters'), parametersShow = $('#show-parameters');
 function setParametersHidden(hidden) {
   closeCoverSizes(); closeOrderMenu();
-  if (hidden && parametersPanel.contains(document.activeElement)) parametersToggle.focus({ preventScroll: true });
-  workspace.classList.toggle('parameters-hidden', hidden); parametersPanel.inert = hidden;
-  parametersPanel.setAttribute('aria-hidden', String(hidden));
+  const focused = parametersPanel.contains(document.activeElement) || document.activeElement === parametersShow;
+  workspace.classList.toggle('parameters-hidden', hidden); parametersContent.inert = hidden;
+  parametersContent.setAttribute('aria-hidden', String(hidden)); parametersShow.hidden = !hidden;
   parametersToggle.setAttribute('aria-expanded', String(!hidden));
-  parametersToggle.title = hidden ? 'Показать параметры' : 'Скрыть параметры';
-  parametersToggle.setAttribute('aria-label', parametersToggle.title);
+  if (focused) (hidden ? parametersShow : parametersToggle).focus({ preventScroll: true });
   try { localStorage.setItem('kero.parametersHidden', String(hidden)); } catch {}
 }
-parametersToggle.onclick = () => setParametersHidden(!workspace.classList.contains('parameters-hidden'));
+parametersToggle.onclick = () => setParametersHidden(true);
+parametersShow.onclick = () => setParametersHidden(false);
 try { setParametersHidden(localStorage.getItem('kero.parametersHidden') === 'true'); } catch {}
 let resizeFrame;
 function schedulePreviewResize() {

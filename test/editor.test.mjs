@@ -2,6 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHistory, historyShortcut } from '../public/history.js';
 
+test('undoing to an empty canvas retains the photos needed for immediate redo', () => {
+  const history = createHistory(3), frames = [{ id: 'a', instanceId: 'a-1' }, { id: 'a', instanceId: 'a-2' }, { id: 'b', instanceId: 'b-1' }];
+  history.checkpoint([]);
+  assert.deepEqual(history.undo(frames), []);
+  assert.deepEqual([...history.nearbyPhotoIds()].sort(), ['a', 'b']);
+  assert.deepEqual(history.redo([]), frames);
+  history.checkpoint(frames);
+  assert.deepEqual([...history.nearbyPhotoIds()].sort(), ['a', 'b']);
+  history.clear(); assert.equal(history.nearbyPhotoIds().size, 0);
+  history.checkpoint([{ id: 'old' }]); history.checkpoint([{ id: 'recent' }]);
+  assert.deepEqual([...history.nearbyPhotoIds()], ['recent']);
+});
+
 test('undo shortcuts work with Russian layouts and both redo combinations', () => {
   assert.equal(historyShortcut({ ctrlKey: true, code: 'KeyZ', key: 'я' }), 'undo');
   assert.equal(historyShortcut({ ctrlKey: true, shiftKey: true, code: 'KeyZ', key: 'Я' }), 'redo');

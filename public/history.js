@@ -10,6 +10,9 @@ export function createHistory(limit = 50) {
   return {
     get canUndo() { return past.length > 0; },
     get canRedo() { return future.length > 0; },
+    nearbyPhotoIds() {
+      return new Set([...(past.at(-1) || []), ...(future.at(-1) || [])].map(item => item.id));
+    },
     checkpoint(items) {
       past.push(structuredClone(items));
       if (past.length > limit) past.shift();

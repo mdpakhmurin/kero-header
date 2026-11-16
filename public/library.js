@@ -14,7 +14,7 @@ export function selectedLibraryPhotos(ids, photos, exclusions, community) {
 
 export function sortLibraryPhotos(photos, key = 'date', direction = 'desc') {
   const value = photo => {
-    const n = key === 'area' ? Number(photo.width) * Number(photo.height) : photoTime(photo);
+    const n = key === 'ratio' ? (photo.width > 0 && photo.height > 0 ? Number(photo.width) / Number(photo.height) : null) : photoTime(photo);
     return Number.isFinite(n) && n > 0 ? n : null;
   };
   return [...photos].sort((a, b) => {

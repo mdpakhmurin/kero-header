@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { librarySource, sortLibraryPhotos, selectedLibraryPhotos } from '../public/library.js';
 
-test('library sorts original pixel area in either direction and leaves unknown sizes last', () => {
-  const photos = [{ id: 'unknown' }, { id: 'wide', width: 1000, height: 20, bytes: 9000 }, { id: 'square', width: 200, height: 200, bytes: 10 }];
-  assert.deepEqual(sortLibraryPhotos(photos, 'area', 'desc').map(p => p.id), ['square', 'wide', 'unknown']);
-  assert.deepEqual(sortLibraryPhotos(photos, 'area', 'asc').map(p => p.id), ['wide', 'square', 'unknown']);
+test('library sorts aspect ratios independently of pixel area and leaves unknown dimensions last', () => {
+  const photos = [{ id: 'unknown' }, { id: 'wide', width: 1000, height: 20 }, { id: 'square', width: 2000, height: 2000 }, { id: 'portrait', width: 100, height: 300 }];
+  assert.deepEqual(sortLibraryPhotos(photos, 'ratio', 'desc').map(p => p.id), ['wide', 'square', 'portrait', 'unknown']);
+  assert.deepEqual(sortLibraryPhotos(photos, 'ratio', 'asc').map(p => p.id), ['portrait', 'square', 'wide', 'unknown']);
   assert.equal(photos[0].id, 'unknown');
+  assert.deepEqual(sortLibraryPhotos([{ id: 'bad', width: 100, height: 0 }, { id: 'valid', width: 50, height: 50 }], 'ratio', 'asc').map(p => p.id), ['valid', 'bad']);
+  assert.deepEqual(sortLibraryPhotos([{ id: 'b', width: 200, height: 100 }, { id: 'a', width: 20, height: 10 }], 'ratio').map(p => p.id), ['a', 'b']);
 });
 
 test('VK dates sort in either direction with unknown dates last and stable ties', () => {
