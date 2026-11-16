@@ -247,6 +247,9 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   assert.equal((await post('/api/import', { name: 'x.svg', data: Buffer.from('<svg></svg>').toString('base64') })).status, 400);
   const { id } = await (await post('/api/import', { name: 'test.png', data: png.toString('base64') })).json();
   assert.match(id, /^local_/); assert.equal((await fetch(base + '/images/' + id)).headers.get('content-type'), 'image/png');
+  const importedPhoto = (await (await fetch(base + '/api/state')).json()).photos.find(photo => photo.id === id);
+  assert.equal(importedPhoto.version, digest(png));
+  assert.equal('url' in importedPhoto, false);
   const coverSizes = [...defaults.coverSizes, { width: 1600, height: 600 }];
   const savedSettings = await (await post('/api/settings', { ...defaults, rotation: 50, layoutOrder: 'newest', seed: 42, scatter: 100, width: 1600, height: 600, coverSizes })).json();
   assert.equal('seed' in savedSettings, false);

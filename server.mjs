@@ -32,7 +32,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
         let available = false;
         try { available = (await stat(imagePath(root, p))).size > 0; } catch (e) { if (e.code !== 'ENOENT') throw e; }
         const { url, hash, ...publicPhoto } = p;
-        return { ...publicPhoto, available, src: `/images/${p.id}` };
+        return { ...publicPhoto, available, version: hash, src: `/images/${p.id}` };
       }));
       return json(res, 200, { settings, exclusions, photos, lastSync: library.lastSync, hasToken: Boolean(token), sync });
     }
@@ -134,7 +134,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
         const data = await readImage(root, library.photos[id]);
         res.writeHead(200, { 'Content-Type': library.photos[id].mime || 'application/octet-stream', 'Cache-Control': 'no-cache' }); res.end(data); return;
       }
-      const routes = { '/': ['index.html', 'text/html'], '/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'], '/library.js': ['library.js', 'text/javascript'], '/render.js': ['render.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/history.js': ['history.js', 'text/javascript'], '/coverage.js': ['coverage.js', 'text/javascript'], '/viewer.js': ['viewer.js', 'text/javascript'] };
+      const routes = { '/': ['index.html', 'text/html'], '/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'], '/library.js': ['library.js', 'text/javascript'], '/render.js': ['render.js', 'text/javascript'], '/previews.js': ['previews.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/history.js': ['history.js', 'text/javascript'], '/coverage.js': ['coverage.js', 'text/javascript'], '/viewer.js': ['viewer.js', 'text/javascript'] };
       if (!routes[path]) return json(res, 404, { error: 'Не найдено' });
       const [file, type] = routes[path];
       res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-cache' }); res.end(await readFile(join(here, 'public', file)));

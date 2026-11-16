@@ -1,12 +1,14 @@
 import { generateAsync, shuffleSources, manualFrames, hitTest, selectionGeometry, selectionHit, resizeSelection, rotateSelection, floatingPanelPosition } from './collage.js';
 import { photoSource, librarySource, sortLibraryPhotos, selectedLibraryPhotos } from './library.js';
-import { createPhotoRenderer, previewDimensions, renderDimensions, fitCanvasSize, smooth } from './render.js';
+import { createPhotoRenderer, previewDimensions, renderDimensions, fitCanvasSize, smooth, createFrameScheduler, createTransformLayers } from './render.js';
 import { createHistory, historyShortcut } from './history.js';
+import { decodePreview, createPreviewCache } from './previews.js';
 import { emptySpacePercent } from './coverage.js';
 import { createPhotoViewer } from './viewer.js';
 const $ = selector => document.querySelector(selector);
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
 const preview = document.createElement('canvas'), photoRenderer = createPhotoRenderer();
+const transformLayers = createTransformLayers(), editorFrames = createFrameScheduler(() => { try { renderEditor(); } catch (error) { report(error); } });
 const canvasWrap = $('.canvas-wrap'), selectionPanel = $('#selection-panel'), selectionOutline = $('#selection-outline');
 const history = createHistory();
 const photoViewer = createPhotoViewer($('#photo-viewer'), {
@@ -19,14 +21,20 @@ const photoViewer = createPhotoViewer($('#photo-viewer'), {
 });
 const libraryDialog = $('#library-dialog'), libraryChosen = new Set();
 let libraryBusy = false, librarySession = 0, libraryRendered = 0, libraryFrame = null;
-let state, items = [], selected = null, filter = 'active', limit = 60, images = new Map(), drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false, coverageTimer, coverageKey;
+let state, items = [], selected = null, filter = 'active', limit = 60, images = new Map(), drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false, coverageTimer;
 let savedSettings, settingsSaving = false;
 let generating = false;
+let sceneDirty = true, fullScenePending = true, sceneRevision = 0, layoutDirty = true, previewLayout;
+let canvasBounds = null;
+let wheelItem = null, pendingImageLoads = 0, imageLoadQueue = Promise.resolve();
+let measuringLibrary = false;
+const failedMeasurements = new Set();
 let exporting = false, coverUploading = false, coverPayload = null, coverPreviewUrl, coverSession = 0;
 let historyQueue = Promise.resolve();
 let libraryOrigin = 'vk';
 const librarySort = { vk: { key: 'date', direction: 'desc' }, local: { key: 'ratio', direction: 'desc' } };
 const librarySizes = new Map();
+const previewCache = createPreviewCache({ busy: () => loading || generating || exporting || Boolean(drag || wheelTimer) });
 const numeric = ['rotation', 'border', 'shadow'];
 const numberInputs = [...form.querySelectorAll('input[data-range]')];
 async function api(path, data) {
@@ -49,11 +57,14 @@ function save(path, value) {
   return result;
 }
 function checkpoint() {
-  clearTimeout(wheelTimer); wheelTimer = null; history.checkpoint(items);
+  clearTimeout(wheelTimer); wheelTimer = null; wheelItem = null; history.checkpoint(items);
   if (!generating) { $('#undo').disabled = !history.canUndo; $('#redo').disabled = !history.canRedo; }
 }
 function selectedItem() { return items.find(item => item.instanceId === selected); }
-function available() { return state.photos.filter(p => p.available && !state.exclusions.includes(p.id) && (p.source === 'local' || p.community === state.settings.community)); }
+function available() {
+  const excluded = new Set(state.exclusions);
+  return state.photos.filter(p => p.available && !excluded.has(p.id) && (librarySource(p) === 'local' || p.community === state.settings.community));
+}
 function visibleItems() { const ids = new Set(available().map(p => p.id)); return items.filter(i => ids.has(i.id)); }
 function readSettings() {
   const next = { ...state.settings };
@@ -204,8 +215,13 @@ function updateSettings() {
   state.settings = readSettings();
   updateLabels(); draw(); updateSaveStatus();
 }
-async function loadImages(generationPhotos, onProgress) {
-  loading = true;
+function loadImages(generationPhotos, onProgress) {
+  pendingImageLoads++; loading = true;
+  const task = imageLoadQueue.catch(() => {}).then(() => performImageLoad(generationPhotos, onProgress));
+  imageLoadQueue = task;
+  return task.finally(() => { pendingImageLoads--; loading = pendingImageLoads > 0; });
+}
+async function performImageLoad(generationPhotos, onProgress) {
   const visible = new Set(visibleItems().map(item => item.id));
   const photos = generationPhotos ?? available().filter(photo => visible.has(photo.id));
   const needed = new Set(photos.map(photo => photo.id));
@@ -218,30 +234,33 @@ async function loadImages(generationPhotos, onProgress) {
       const photo = photos[index++];
       const cached = images.get(photo.id);
       if (cached) { const dimensions = await librarySizes.get(photo.id); if (dimensions) Object.assign(photo, dimensions); else { photo.width ||= cached.width; photo.height ||= cached.height; } onProgress?.(++completed, photos.length); continue; }
+      let bitmap;
       try {
-        const response = await fetch(photo.src);
-        if (!response.ok) throw new Error();
-        const blob = await response.blob();
-        let bitmap = await createImageBitmap(blob);
-        photo.width = bitmap.width; photo.height = bitmap.height;
-        librarySizes.set(photo.id, Promise.resolve({ width: bitmap.width, height: bitmap.height }));
-        if (Math.max(bitmap.width, bitmap.height) > 1200) {
-          const factor = 1200 / Math.max(bitmap.width, bitmap.height);
-          const reduced = await createImageBitmap(bitmap, { resizeWidth: Math.round(bitmap.width * factor), resizeHeight: Math.round(bitmap.height * factor), resizeQuality: 'high' });
-          bitmap.close(); bitmap = reduced;
+        let decoded = await previewCache.read(photo);
+        if (!decoded) {
+          const response = await fetch(photo.src);
+          if (!response.ok) throw new Error();
+          decoded = await decodePreview(await response.blob(), photo);
+          previewCache.remember(photo, decoded);
         }
+        bitmap = decoded.image;
+        photo.width = decoded.width; photo.height = decoded.height;
+        librarySizes.set(photo.id, Promise.resolve({ width: decoded.width, height: decoded.height }));
         images.set(photo.id, bitmap);
-      } catch { photo.available = false; }
+        bitmap = null;
+      } catch { bitmap?.close(); photo.available = false; }
       onProgress?.(++completed, photos.length);
     }
   };
-  await Promise.all(Array.from({ length: 4 }, worker)); loading = false;
+  const workers = await Promise.allSettled(Array.from({ length: 6 }, worker));
+  const failed = workers.find(result => result.status === 'rejected');
+  if (failed) throw failed.reason;
 }
-async function measureLibraryPhotos(photos) {
+async function measureLibraryPhotos(photos, shouldContinue) {
   let index = 0;
   const needed = photos.filter(photo => photo.available && !(photo.width > 0 && photo.height > 0));
   await Promise.all(Array.from({ length: 4 }, async () => {
-    while (index < needed.length) {
+    while (index < needed.length && shouldContinue()) {
       const photo = needed[index++];
       if (!librarySizes.has(photo.id)) librarySizes.set(photo.id, new Promise(resolve => {
         const image = new Image();
@@ -252,73 +271,105 @@ async function measureLibraryPhotos(photos) {
       }));
       const pending = librarySizes.get(photo.id), size = await pending;
       if (size) Object.assign(photo, size);
-      else if (librarySizes.get(photo.id) === pending) librarySizes.delete(photo.id);
+      else {
+        if (librarySizes.get(photo.id) === pending) librarySizes.delete(photo.id);
+        if (shouldContinue()) failedMeasurements.add(photo.id);
+      }
     }
   }));
+}
+function requestLibraryMeasurements(photos) {
+  if (measuringLibrary) return;
+  const needed = photos.filter(photo => photo.available && !(photo.width > 0 && photo.height > 0) && !failedMeasurements.has(photo.id));
+  if (!needed.length) return;
+  measuringLibrary = true;
+  const origin = libraryOrigin, source = state.photos;
+  measureLibraryPhotos(needed, () => libraryDialog.open && origin === libraryOrigin && source === state.photos && librarySort[origin].key === 'ratio')
+    .catch(report).finally(() => { measuringLibrary = false; renderLibrary(); });
 }
 async function refresh() {
   const fresh = await api('state');
   const draft = state && hasUnsavedSettings() ? state.settings : null;
   savedSettings = structuredClone(fresh.settings); state = fresh;
   if (draft) state.settings = draft;
-  fillForm(); updateSaveStatus(); await loadImages(); renderLibrary(); draw(); updateSelection();
-  measureLibraryPhotos(state.photos).then(() => renderLibrary()).catch(report);
+  failedMeasurements.clear();
+  void previewCache.prune(state.photos);
+  fillForm(); updateSaveStatus(); await loadImages(); renderLibrary(); draw();
   $('#sync').disabled = fresh.sync.running;
   if (fresh.sync.error) { const el = $('#sync-status'); el.hidden = false; el.classList.add('error'); el.textContent = syncMessage(fresh.sync); }
   if (fresh.sync.running) pollSync();
 }
-function paint(context, width, height, pixelScale = 1) {
+function paint(context, width, height, pixelScale, frames) {
   const s = state.settings;
   context.clearRect(0, 0, width, height); context.fillStyle = s.background; context.fillRect(0, 0, width, height);
-  for (const item of visibleItems()) {
+  for (const item of frames) {
     const image = images.get(item.id); if (!image) continue;
     photoRenderer.draw(context, item, image, s, pixelScale);
   }
 }
-function draw() {
+function draw({ transform = false, selectionOnly = false } = {}) {
+  if (!selectionOnly) {
+    sceneDirty = true;
+    if (!transform) { fullScenePending = true; sceneRevision++; transformLayers.invalidate(); }
+  }
+  editorFrames.schedule();
+}
+function renderEditor() {
+  if (!state) return;
   const s = state.settings;
-  const padding = getComputedStyle(canvasWrap);
-  const fitted = fitCanvasSize(canvasWrap.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight), canvasWrap.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom), s.width, s.height);
-  canvas.style.width = `${fitted.width}px`; canvas.style.height = `${fitted.height}px`;
-  canvas.style.aspectRatio = `${s.width} / ${s.height}`;
-  const displaySize = previewDimensions(canvas.clientWidth || s.width, s.width, s.height, window.devicePixelRatio || 1);
-  const renderSize = renderDimensions(displaySize.width, displaySize.height);
-  if (canvas.width !== displaySize.width) canvas.width = displaySize.width;
-  if (canvas.height !== displaySize.height) canvas.height = displaySize.height;
-  if (preview.width !== renderSize.width) preview.width = renderSize.width;
-  if (preview.height !== renderSize.height) preview.height = renderSize.height;
-  const context = smooth(preview.getContext('2d'));
-  context.setTransform(preview.width / s.width, 0, 0, preview.height / s.height, 0, 0);
-  paint(context, s.width, s.height, preview.width / s.width);
-  ctx.setTransform(1, 0, 0, 1, 0, 0); smooth(ctx);
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(preview, 0, 0, canvas.width, canvas.height);
-  $('#canvas-count').textContent = visibleItems().length;
-  $('#canvas-empty-state').hidden = visibleItems().length > 0;
+  const pixelRatio = window.devicePixelRatio || 1;
+  if (layoutDirty || previewLayout?.width !== s.width || previewLayout?.height !== s.height || previewLayout?.pixelRatio !== pixelRatio) {
+    const toolbarHeight = `${$('.editor-top').offsetHeight}px`;
+    if ($('.workspace').style.getPropertyValue('--editor-toolbar-height') !== toolbarHeight) $('.workspace').style.setProperty('--editor-toolbar-height', toolbarHeight);
+    const padding = getComputedStyle(canvasWrap);
+    const fitted = fitCanvasSize(canvasWrap.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight), canvasWrap.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom), s.width, s.height);
+    canvas.style.width = `${fitted.width}px`; canvas.style.height = `${fitted.height}px`;
+    canvas.style.aspectRatio = `${s.width} / ${s.height}`;
+    const displaySize = previewDimensions(fitted.width, s.width, s.height, pixelRatio), renderSize = renderDimensions(displaySize.width, displaySize.height);
+    if (canvas.width !== displaySize.width) canvas.width = displaySize.width;
+    if (canvas.height !== displaySize.height) canvas.height = displaySize.height;
+    if (preview.width !== renderSize.width) preview.width = renderSize.width;
+    if (preview.height !== renderSize.height) preview.height = renderSize.height;
+    previewLayout = { width: s.width, height: s.height, pixelRatio };
+    layoutDirty = false; sceneDirty = fullScenePending = true; transformLayers.invalidate();
+  }
+  const visible = visibleItems();
+  if (sceneDirty) {
+    const context = smooth(preview.getContext('2d'));
+    const layered = !fullScenePending && selected && transformLayers.render({ context, frames: visible, images, settings: s, selected, width: preview.width, height: preview.height, revision: sceneRevision, drawPhoto: photoRenderer.draw });
+    if (!layered) {
+      context.setTransform(preview.width / s.width, 0, 0, preview.height / s.height, 0, 0);
+      paint(context, s.width, s.height, preview.width / s.width, visible);
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0); smooth(ctx);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(preview, 0, 0, canvas.width, canvas.height);
+    clearTimeout(coverageTimer);
+    coverageTimer = setTimeout(() => {
+      const empty = emptySpacePercent(visibleItems(), images, state.settings);
+      $('#empty-percentage').textContent = empty.toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    }, drag || wheelTimer ? 160 : 60);
+    sceneDirty = fullScenePending = false;
+  }
+  $('#canvas-count').textContent = visible.length;
+  $('#canvas-empty-state').hidden = visible.length > 0;
   $('#community-link').href = `https://vk.ru/${encodeURIComponent(s.community)}`;
   $('#dimensions').textContent = `${s.width} × ${s.height}`;
   if (!generating) {
-    $('#export').disabled = $('#install-cover').disabled = !visibleItems().length || loading || exporting;
+    $('#export').disabled = $('#install-cover').disabled = !visible.length || loading || exporting;
     $('#clear-canvas').disabled = !items.length || loading;
     $('#undo').disabled = !history.canUndo;
     $('#redo').disabled = !history.canRedo;
   }
-  const visible = visibleItems();
-  const key = JSON.stringify([s.width, s.height, s.border, visible.map(item => [item.id, item.x, item.y, item.width, item.angle, images.get(item.id)?.width, images.get(item.id)?.height])]);
-  if (key !== coverageKey) {
-    coverageKey = key; clearTimeout(coverageTimer);
-    coverageTimer = setTimeout(() => {
-      const empty = emptySpacePercent(visible, images, s);
-      $('#empty-percentage').textContent = empty.toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-    }, 60);
-  }
-  updateSelection();
+  canvasBounds = canvas.getBoundingClientRect();
+  updateSelection(visible);
+  if (!drag && !wheelTimer) transformLayers.invalidate();
 }
-function updateSelection() {
-  const visible = visibleItems(), item = visible.find(i => i.instanceId === selected), image = images.get(selectedItem()?.id);
+function updateSelection(visible) {
+  const item = visible.find(i => i.instanceId === selected), image = item && images.get(item.id);
   selectionPanel.hidden = selectionOutline.hidden = !item || !image;
   if (!item || !image) { return; }
-  const rect = canvas.getBoundingClientRect(), wrap = canvasWrap.getBoundingClientRect();
+  const rect = canvasBounds, wrap = canvasWrap.getBoundingClientRect();
   const scale = rect.width / state.settings.width, ratio = image.height / image.width, border = state.settings.border;
   const origin = { x: rect.left - wrap.left, y: rect.top - wrap.top };
   Object.assign(selectionOutline.style, {
@@ -422,6 +473,7 @@ function renderLibrary({ append = false } = {}) {
   $('#library-empty').hidden = list.length > 0;
   $('#library-empty').textContent = filter === 'excluded' ? 'Исключённых кадров нет. Выберите фотографии и нажмите «Исключить» внизу.' : filter === 'missing' ? 'Все файлы на месте.' : pool.length ? 'Ничего не найдено.' : libraryOrigin === 'vk' ? 'Здесь появятся фотографии из VK. Синхронизируйте библиотеку.' : 'Здесь появятся ваши фотографии. Нажмите «Загрузить».';
   document.querySelectorAll('.filter').forEach(b => b.classList.toggle('active', b.dataset.filter === filter));
+  if (order.key === 'ratio') requestLibraryMeasurements(list);
 }
 function updateLibrarySelection() {
   const ids = [...libraryChosen], eligible = selectedLibraryPhotos(ids, state.photos, state.exclusions, state.settings.community);
@@ -505,7 +557,7 @@ async function toggleExclusion(id) {
   await save('exclusions', next); state.exclusions = next;
   if (selectedItem()?.id === id) selected = null;
   if (restoring) await loadImages();
-  renderLibrary(); draw(); updateSelection();
+  renderLibrary(); draw();
   toast(restoring ? 'Кадр снова участвует в генерации' : 'Кадр исключён. Вернуть его можно во вкладке «Исключённые».');
 }
 function generationProgress(value, message) {
@@ -603,49 +655,68 @@ $('#clear-canvas').onclick = action(async () => {
   checkpoint(); items = []; selected = null; endDrag();
   await loadImages(); draw(); renderLibrary();
 });
-function point(event) { const rect = canvas.getBoundingClientRect(); return { x: (event.clientX - rect.left) * state.settings.width / rect.width, y: (event.clientY - rect.top) * state.settings.height / rect.height }; }
+function point(event) { const rect = canvasBounds || canvas.getBoundingClientRect(); return { x: (event.clientX - rect.left) * state.settings.width / rect.width, y: (event.clientY - rect.top) * state.settings.height / rect.height }; }
 function itemAt(p) {
-  return [...visibleItems()].reverse().find(i => { const image = images.get(i.id); return image && hitTest(i, image.height / image.width, p.x, p.y, state.settings.border); });
+  const visible = visibleItems();
+  for (let i = visible.length - 1; i >= 0; i--) {
+    const item = visible[i], image = images.get(item.id);
+    if (image && hitTest(item, image.height / image.width, p.x, p.y, state.settings.border)) return item;
+  }
+  return null;
 }
 canvasWrap.onpointerdown = event => {
-  if (!event.isPrimary || event.button !== 0 || event.target.closest('.selection')) return;
+  if (loading || generating || !event.isPrimary || event.button !== 0 || event.target.closest('.selection')) return;
   const p = point(event), current = visibleItems().find(i => i.instanceId === selected), image = images.get(selectedItem()?.id);
-  const scale = canvas.clientWidth / state.settings.width;
+  const scale = (canvasBounds || canvas.getBoundingClientRect()).width / state.settings.width;
   const geometry = current && image && selectionGeometry(current, image.height / image.width, state.settings.border, scale);
   const grip = event.target.closest('.selection-grip');
   const handle = geometry && (grip ? { type: 'resize', ...geometry.corners.find(c => c.sx === Number(grip.dataset.sx) && c.sy === Number(grip.dataset.sy)) } : event.target.closest('#selection-rotate') ? { type: 'rotate' } : selectionHit(geometry, p, scale));
   const item = handle ? current : event.target === canvas ? itemAt(p) : null;
-  selected = item?.instanceId || null;
+  const nextSelected = item?.instanceId || null;
+  if (nextSelected !== selected) { clearTimeout(wheelTimer); wheelTimer = null; wheelItem = null; }
+  selected = nextSelected;
   if (item) {
     event.preventDefault();
     drag = { item, start: { ...item }, point: p, handle, ratio: images.get(item.id).height / images.get(item.id).width, pointerAngle: Math.atan2(p.y - item.y, p.x - item.x), changed: false };
     canvasWrap.setPointerCapture(event.pointerId); canvasWrap.classList.add('transforming'); canvasWrap.classList.toggle('rotating', handle?.type === 'rotate');
   }
-  draw(); updateSelection(); renderLibrary();
+  draw({ selectionOnly: true });
 };
 canvasWrap.onpointermove = event => {
+  if (loading || generating) return;
   const p = point(event);
-  if (!drag) { canvas.style.cursor = itemAt(p) ? 'move' : 'default'; return; }
+  if (!drag) { const cursor = itemAt(p) ? 'move' : 'default'; if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor; return; }
   let next;
   if (drag.handle?.type === 'resize') next = resizeSelection(drag.start, drag.handle, { x: drag.handle.x + p.x - drag.point.x, y: drag.handle.y + p.y - drag.point.y }, drag.ratio, state.settings.border);
   else if (drag.handle?.type === 'rotate') next = { angle: rotateSelection(drag.start, p, drag.pointerAngle, event.shiftKey) };
   else next = { x: Math.max(-10000, Math.min(20000, drag.start.x + p.x - drag.point.x)), y: Math.max(-10000, Math.min(20000, drag.start.y + p.y - drag.point.y)) };
   if (!Object.entries(next).some(([key, value]) => Math.abs(drag.item[key] - value) > .0001)) return;
   if (!drag.changed) { checkpoint(); drag.changed = true; }
-  Object.assign(drag.item, next); draw();
+  Object.assign(drag.item, next); draw({ transform: true });
 };
-const endDrag = () => { drag = null; canvasWrap.classList.remove('transforming', 'rotating'); };
+const endDrag = () => {
+  const wasDragging = Boolean(drag);
+  drag = null; canvasWrap.classList.remove('transforming', 'rotating');
+  if (wasDragging) draw({ selectionOnly: true });
+};
 canvasWrap.onpointerup = canvasWrap.onpointercancel = canvasWrap.onlostpointercapture = endDrag;
 canvas.addEventListener('wheel', event => {
+  if (loading || generating || !event.deltaY) return;
   const item = items.find(i => i.instanceId === selected); if (!item) return;
-  event.preventDefault(); if (!wheelTimer) checkpoint();
+  event.preventDefault(); if (!wheelTimer || wheelItem !== item.instanceId) checkpoint();
+  wheelItem = item.instanceId;
   if (!event.shiftKey) item.angle = (item.angle + Math.sign(event.deltaY) * 4) % 360;
   else item.width = Math.max(10, Math.min(10000, item.width * (event.deltaY > 0 ? .95 : 1.05)));
-  draw(); updateSelection(); clearTimeout(wheelTimer); wheelTimer = setTimeout(() => { wheelTimer = null; }, 250);
+  draw({ transform: true }); clearTimeout(wheelTimer);
+  wheelTimer = setTimeout(() => { wheelTimer = null; wheelItem = null; draw({ selectionOnly: true }); }, 250);
 }, { passive: false });
-async function editSelected(fn) { const item = items.find(i => i.instanceId === selected); if (!item) return; checkpoint(); fn(item); draw(); updateSelection(); }
+async function editSelected(fn, transform = false) {
+  if (loading || generating) return;
+  const item = selectedItem(); if (!item) return;
+  endDrag(); checkpoint(); fn(item); draw({ transform });
+}
 selectionPanel.addEventListener('keydown', event => {
-  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); selected = null; draw(); renderLibrary(); }
+  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); selected = null; draw({ selectionOnly: true }); }
 });
 for (const grip of selectionOutline.querySelectorAll('button')) grip.onkeydown = action(async event => {
   if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
@@ -654,7 +725,7 @@ for (const grip of selectionOutline.querySelectorAll('button')) grip.onkeydown =
   await editSelected(item => {
     if (grip.id === 'selection-rotate') item.angle = (item.angle + direction * (event.shiftKey ? 15 : 1)) % 360;
     else item.width = Math.max(10, Math.min(10000, item.width + direction * (event.shiftKey ? 50 : 10)));
-  });
+  }, true);
 });
 $('#to-front').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); items.push(item); }));
 $('#to-back').onclick = action(() => editSelected(item => { items = items.filter(i => i !== item); items.unshift(item); }));
@@ -671,9 +742,9 @@ async function restoreHistory(direction) {
   if (loading) throw new Error('Дождитесь загрузки изображений');
   const restored = history[direction](items);
   if (!restored) return;
-  clearTimeout(wheelTimer); wheelTimer = null; endDrag();
+  clearTimeout(wheelTimer); wheelTimer = null; wheelItem = null; endDrag();
   items = restored; selected = null;
-  await loadImages(); draw(); updateSelection(); renderLibrary();
+  await loadImages(); draw(); renderLibrary();
 }
 function queueHistory(direction) {
   historyQueue = historyQueue.catch(() => {}).then(() => restoreHistory(direction));
@@ -685,16 +756,17 @@ window.addEventListener('keydown', event => {
   if (generating || document.querySelector('dialog[open]')) return;
   if (event.key === 'Escape' && $('#preset-menu').matches(':popover-open')) { event.preventDefault(); closeCoverSizes(true); return; }
   const target = event.target;
-  const editingText = target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' && ['text', 'url', 'password', 'email', 'tel', 'search'].includes(target.type);
+  const editingText = target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' && ['text', 'number', 'url', 'password', 'email', 'tel', 'search'].includes(target.type);
   if (editingText) return;
   const direction = historyShortcut(event);
   if (direction) { event.preventDefault(); action(() => queueHistory(direction))(); return; }
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName)) return;
   if (event.key === 'Delete' && selected) { event.preventDefault(); $('#remove').click(); }
-  if (event.key === 'Escape') { selected = null; draw(); updateSelection(); }
+  if (event.key === 'Escape') { selected = null; draw({ selectionOnly: true }); }
 });
 async function renderCoverBlob() {
   const exportItems = structuredClone(visibleItems()), s = structuredClone(state.settings);
+  const sources = new Map(state.photos.map(photo => [photo.id, photo.src]));
   if (!exportItems.length) throw new Error('Сначала добавьте фотографии на холст');
   let surface, output;
   try {
@@ -706,7 +778,7 @@ async function renderCoverBlob() {
     context.setTransform(scale, 0, 0, surface.height / s.height, 0, 0);
     context.fillStyle = s.background; context.fillRect(0, 0, s.width, s.height);
     for (const item of exportItems) {
-      const photo = state.photos.find(p => p.id === item.id), response = await fetch(photo.src);
+      const response = await fetch(sources.get(item.id));
       if (!response.ok) throw new Error('В кеше отсутствует фото. Синхронизируйте библиотеку перед экспортом.');
       const image = await createImageBitmap(await response.blob());
       try { photoRenderer.draw(context, item, image, s, scale); }
@@ -887,15 +959,13 @@ function setParametersHidden(hidden) {
 parametersToggle.onclick = () => setParametersHidden(true);
 parametersShow.onclick = () => setParametersHidden(false);
 try { setParametersHidden(localStorage.getItem('kero.parametersHidden') === 'true'); } catch {}
-let resizeFrame;
 function schedulePreviewResize() {
-  cancelAnimationFrame(resizeFrame);
-  resizeFrame = requestAnimationFrame(() => {
-    workspace.style.setProperty('--editor-toolbar-height', `${$('.editor-top').offsetHeight}px`);
-    if (state) draw();
-  });
+  canvasBounds = null;
+  layoutDirty = true;
+  if (state) draw({ selectionOnly: true });
 }
 const editorResizeObserver = new ResizeObserver(schedulePreviewResize);
 editorResizeObserver.observe(canvasWrap); editorResizeObserver.observe($('.editor-top'));
 window.addEventListener('resize', schedulePreviewResize);
+window.addEventListener('scroll', () => { canvasBounds = null; }, true);
 await refresh().catch(report);
