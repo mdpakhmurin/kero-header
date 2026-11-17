@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import { defaults, validateSettings, validateLayout, cacheValid, writeJSON, saveImage, digest } from '../lib/storage.mjs';
 import { syncLibrary, paginate, wallPhotos, createVK, connectionError } from '../lib/vk.mjs';
-import { createApp } from '../server.mjs';
+import { createApp as createAppServer } from '../server.mjs';
+const createApp = (root, options = {}) => createAppServer(root, { ...options, requireAuth: false });
 import { generate, hitTest } from '../public/collage.js';
 import { photoSource } from '../public/library.js';
 import { photoSizeRange, coverSizeLabel, removeCoverSize } from '../public/settings.js';
@@ -295,6 +296,7 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   assert.match((await fetch(base + '/favicon.svg')).headers.get('content-type'), /image\/svg\+xml/);
   assert.match((await fetch(base + '/assets/favicon.svg')).headers.get('content-type'), /image\/svg\+xml/);
   assert.equal((await fetch(base + '/demo.js')).status, 200);
+  assert.equal((await fetch(base + '/auth.js')).status, 200);
   assert.equal((await post('/api/images/open-folder', {}, { Origin: 'https://evil.example' })).status, 403);
   assert.equal(openedFolders.length, 0);
   assert.deepEqual(await (await post('/api/images/open-folder', { path: 'C:/unrelated' })).json(), { opened: true });

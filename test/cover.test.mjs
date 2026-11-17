@@ -4,7 +4,8 @@ import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { coverCommunity, coverImage, installCover } from '../lib/cover.mjs';
-import { createApp } from '../server.mjs';
+import { createApp as createAppServer } from '../server.mjs';
+const createApp = (root, options = {}) => createAppServer(root, { ...options, requireAuth: false });
 import { defaults, writeJSON } from '../lib/storage.mjs';
 
 const png = await readFile(new URL('../public/assets/pigeon.png', import.meta.url));

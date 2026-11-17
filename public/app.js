@@ -7,12 +7,14 @@ import { decodePreview, createPreviewCache } from './previews.js';
 import { emptySpacePercent } from './coverage.js';
 import { createPhotoViewer } from './viewer.js';
 import { initialMode, createClient, createDemoBackend } from './demo.js';
+import { setupAuth } from './auth.js';
 const $ = selector => document.querySelector(selector);
 let rememberedMode;
 try { rememberedMode = localStorage.getItem('kero.mode'); } catch {}
 const mode = initialMode(location.search, rememberedMode), demoMode = mode === 'demo';
 const demoBackend = demoMode ? createDemoBackend() : null;
 const client = createClient({ demoMode, demo: demoBackend });
+let currentUser = null;
 document.body.dataset.mode = mode;
 if (demoMode) {
   const policy = document.createElement('meta');
@@ -20,7 +22,9 @@ if (demoMode) {
   document.head.append(policy);
 }
 try { localStorage.setItem('kero.mode', mode); } catch {}
-window.addEventListener('pagehide', event => { if (!event.persisted) demoBackend?.dispose(); });
+window.addEventListener('pagehide', event => { if (!event.persisted) demoBackend?.dispose(); if (!demoMode) document.body.dataset.view = 'loading'; });
+window.addEventListener('pageshow', event => { if (event.persisted && !demoMode) location.reload(); });
+window.addEventListener('storage', event => { if (!demoMode && event.key === 'kero.authChanged') location.reload(); });
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
 const preview = document.createElement('canvas'), photoRenderer = createPhotoRenderer();
 const transformLayers = createTransformLayers(), editorFrames = createFrameScheduler(() => { try { renderEditor(); } catch (error) { report(error); } });
@@ -49,14 +53,17 @@ let historyQueue = Promise.resolve();
 let libraryOrigin = demoMode ? 'local' : 'vk';
 const librarySort = { vk: { key: 'date', direction: 'desc' }, local: { key: 'ratio', direction: 'desc' } };
 const librarySizes = new Map();
-const previewCache = createPreviewCache({ cacheName: demoMode ? 'kero-demo-previews-v1' : 'kero-previews-v1', busy: () => loading || generating || exporting || Boolean(drag || wheelTimer) });
+let previewCache = createPreviewCache({ cacheName: demoMode ? 'kero-demo-previews-v1' : 'kero-previews-v1', busy: () => loading || generating || exporting || Boolean(drag || wheelTimer) });
 const numeric = ['rotation', 'border', 'shadow'];
 const numberInputs = [...form.querySelectorAll('input[data-range]')];
 async function api(path, data) {
   return client.request(path, data);
 }
 function toast(message, error = false) { const el = $('#toast'); el.textContent = message; el.classList.toggle('error', error); el.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => el.hidden = true, error ? 9000 : 4000); }
-function report(error) { toast(error.message, true); }
+function report(error) {
+  if (!demoMode && error.status === 401) { location.replace('/?mode=local'); return; }
+  toast(error.message, true);
+}
 function syncMessage(progress) {
   return progress.message + (progress.warnings?.length ? '\n' + progress.warnings.join('\n') : '');
 }
@@ -1032,6 +1039,7 @@ window.addEventListener('scroll', () => { canvasBounds = null; }, true);
 $('#demo-badge').hidden = !demoMode;
 if (demoMode) {
   $('#community-link').removeAttribute('href'); $('#community-link').removeAttribute('aria-label');
+  $('[data-mode-choice=local]').textContent = 'Войти';
   $('#install-cover').hidden = true;
   $('[data-source=vk]').hidden = true;
   $('#vk-actions').hidden = true;
@@ -1052,4 +1060,31 @@ document.querySelectorAll('[data-mode-choice]').forEach(button => {
     } finally { switchingMode = false; }
   });
 });
-await refresh().catch(report);
+function enterMode(target) {
+  const url = new URL(location.href); url.searchParams.set('mode', target); location.replace(url.href);
+}
+function notifyAuthChange() { try { localStorage.setItem('kero.authChanged', crypto.randomUUID()); } catch {} }
+setupAuth({ request: api, enter: () => { notifyAuthChange(); enterMode('local'); } });
+$('#auth-demo').onclick = () => enterMode('demo');
+$('#logout').onclick = action(async () => {
+  if (loading || generating || exporting || settingsSaving || libraryBusy || coverUploading || polling || $('#import').disabled) { toast('Дождитесь завершения текущей операции'); return; }
+  if ((items.length || hasUnsavedSettings()) && !await confirmAction({ title: 'Выйти из аккаунта?', description: 'Текущий холст и несохранённые настройки будут сброшены. Сохранённая библиотека останется в вашем аккаунте.', label: 'Выйти', danger: false })) return;
+  await saveQueue.catch(() => {}); await api('auth/logout', {});
+  notifyAuthChange();
+  previewCache.dispose();
+  try { await caches.delete(`kero-user-${currentUser.id}-previews-v1`); } catch {}
+  enterMode('local');
+});
+async function boot() {
+  if (!demoMode) {
+    currentUser = (await api('auth/session')).user;
+    if (!currentUser) { document.body.dataset.view = 'auth'; return; }
+    $('#account-name').textContent = currentUser.login;
+    $('#account-controls').hidden = currentUser.id === 'local-preview';
+    previewCache.dispose();
+    previewCache = createPreviewCache({ cacheName: `kero-user-${currentUser.id}-previews-v1`, busy: () => loading || generating || exporting || Boolean(drag || wheelTimer) });
+    try { await caches.delete('kero-previews-v1'); } catch {}
+  }
+  await refresh(); document.body.dataset.view = 'editor'; layoutDirty = true; draw();
+}
+await boot().catch(error => { document.body.dataset.view = demoMode ? 'editor' : 'auth'; report(error); });

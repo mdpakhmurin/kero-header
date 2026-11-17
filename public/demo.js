@@ -13,7 +13,7 @@ export function createClient({ demoMode, demo, fetcher = globalThis.fetch }) {
       if (demoMode) return demo.request(path, data);
       const response = await fetcher(`/api/${path}`, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Ошибка сервера');
+      if (!response.ok) throw Object.assign(new Error(result.error || 'Ошибка сервера'), { status: response.status });
       return result;
     },
     async photoBlob(photo) {

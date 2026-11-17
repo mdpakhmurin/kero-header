@@ -9,7 +9,7 @@ export function previewCacheKey(photo) {
 // Storage is optional (private browsing, quota limits, etc.). Never let a cache
 // failure prevent editing. Only lossless, resized previews are stored here.
 export function createPreviewCache({ storage = globalThis.caches, busy = () => false, cacheName = CACHE_NAME } = {}) {
-  let opened, timer, writing = false;
+  let opened, timer, writing = false, disposed = false;
   const pending = new Map();
   const open = () => opened ||= Promise.resolve().then(() => storage?.open(cacheName)).catch(() => null);
   async function trim(cache, allowed) {
@@ -23,7 +23,7 @@ export function createPreviewCache({ storage = globalThis.caches, busy = () => f
     }
   }
   function schedule() {
-    if (!timer && !writing && pending.size) timer = setTimeout(flush, 500);
+    if (!disposed && !timer && !writing && pending.size) timer = setTimeout(flush, 500);
   }
   async function flush() {
     timer = null;
@@ -32,7 +32,7 @@ export function createPreviewCache({ storage = globalThis.caches, busy = () => f
     let cache, written = 0;
     try {
       cache = await open();
-      while (cache && pending.size && !busy()) {
+      while (!disposed && cache && pending.size && !busy()) {
         const [key, entry] = pending.entries().next().value; pending.delete(key);
         const { image, width, height } = entry;
         if (!image.width || !image.height) continue; // Released by undo / another composition.
@@ -41,7 +41,7 @@ export function createPreviewCache({ storage = globalThis.caches, busy = () => f
           canvas.width = image.width; canvas.height = image.height;
           canvas.getContext('2d').drawImage(image, 0, 0);
           const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-          if (blob && blob.size <= CACHE_BUDGET) {
+          if (!disposed && blob && blob.size <= CACHE_BUDGET) {
             await cache.put(key, new Response(blob, { headers: { 'Content-Type': 'image/png', 'X-Original-Width': String(width), 'X-Original-Height': String(height), 'X-Preview-Bytes': String(blob.size) } }));
             if (++written % 16 === 0) await trim(cache);
           }
@@ -53,6 +53,7 @@ export function createPreviewCache({ storage = globalThis.caches, busy = () => f
     finally { try { if (cache) await trim(cache); } catch { /* Quota / storage restrictions. */ } writing = false; schedule(); }
   }
   return {
+    dispose() { disposed = true; clearTimeout(timer); timer = null; pending.clear(); },
     async read(photo, decode = blob => createImageBitmap(blob)) {
       const key = previewCacheKey(photo); if (!key) return null;
       let cache;
@@ -64,6 +65,7 @@ export function createPreviewCache({ storage = globalThis.caches, busy = () => f
       } catch { await cache?.delete(key).catch(() => {}); return null; }
     },
     remember(photo, decoded) {
+      if (disposed) return;
       const key = previewCacheKey(photo); if (!key) return;
       pending.set(key, decoded); schedule();
     },

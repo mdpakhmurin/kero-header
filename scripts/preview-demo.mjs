@@ -24,5 +24,5 @@ const photos = {};
 for (let n = 0; n < 12; n++) { const data = sample(n), id = `local_${digest(data)}`; photos[id] = { id, source: 'local', title: `Тестовый кадр ${n + 1}`, ...await saveImage(root, id, data) }; }
 await writeJSON(join(root, 'cache/library.json'), { photos });
 await writeJSON(join(root, 'config/settings.json'), defaults);
-const app = await createApp(root);
+const app = await createApp(root, { requireAuth: false });
 app.listen(3211, '127.0.0.1', () => console.log('Isolated preview: http://localhost:3211'));

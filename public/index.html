@@ -1,11 +1,16 @@
 <!doctype html>
 <html lang="ru">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Редактор обложек</title><link rel="icon" type="image/svg+xml" href="/assets/favicon.svg"><link rel="stylesheet" href="/style.css"></head>
-<body>
+<body data-view="loading">
   <header class="topbar">
     <a id="community-link" class="brand-signature" href="https://vk.ru/kero_comics" aria-label="Ке'Ро — паблик VK" draggable="false">Ке'Ро</a>
-    <div class="header-modes"><div class="mode-switch" role="group" aria-label="Режим редактора"><button type="button" data-mode-choice="local" aria-pressed="true">Основной</button><button type="button" data-mode-choice="demo" aria-pressed="false">Демо</button></div><span id="demo-badge" class="demo-badge" hidden>Демо-режим</span></div>
+    <div class="header-modes"><div class="mode-switch" role="group" aria-label="Режим редактора"><button type="button" data-mode-choice="local" aria-pressed="true">Основной</button><button type="button" data-mode-choice="demo" aria-pressed="false">Демо</button></div><span id="demo-badge" class="demo-badge" hidden>Демо-режим</span><div id="account-controls" class="account-controls" hidden><span id="account-name"></span><button id="logout" type="button" class="header-account-button">Выйти</button></div></div>
   </header>
+  <div id="auth-loading" class="auth-loading" role="status">Открываем редактор…</div>
+  <section id="auth-screen" class="auth-screen" aria-labelledby="auth-title">
+    <div class="auth-intro"><span class="auth-eyebrow">Редактор обложек</span><h1>Ваши кадры.<br>Ваше пространство.</h1><p>Собирайте композиции, загружайте фотографии и возвращайтесь к своей библиотеке.</p><div class="auth-demo-note"><strong>Можно начать без аккаунта</strong><span>В демо фотографии и настройки остаются в этом браузере.</span></div><button id="auth-demo" class="button light" type="button">Продолжить в демо-режиме<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h16m-6-6 6 6-6 6"/></svg></button></div>
+    <div class="auth-card"><div class="auth-tabs" role="group" aria-label="Доступ к аккаунту"><button type="button" data-auth-tab="login" aria-pressed="true">Вход</button><button type="button" data-auth-tab="register" aria-pressed="false">Регистрация</button></div><h2 id="auth-title">С возвращением</h2><p class="auth-subtitle">Личная библиотека и настройки редактора</p><form id="auth-form"><label class="field-label">Логин<input name="login" type="text" autocomplete="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.\-]{3,32}" required placeholder="Ваш логин"></label><span class="auth-field-hint">Латинские буквы, цифры, точка, дефис или подчёркивание</span><label class="field-label">Пароль<input name="password" type="password" autocomplete="current-password" maxlength="128" required></label><span id="auth-password-hint" class="auth-field-hint" hidden>От 12 до 128 символов</span><label id="auth-confirm-field" class="field-label" hidden>Повторите пароль<input name="confirmPassword" type="password" autocomplete="new-password" maxlength="128" disabled></label><div id="auth-error" class="auth-error" role="alert" hidden></div><button id="auth-submit" class="button accent" type="submit">Войти</button></form></div>
+  </section>
   <main>
     <div class="workspace">
       <div class="parameters-slot" id="parameters-panel"><aside class="panel controls" id="parameters-content">
