@@ -2,6 +2,7 @@ import { generateAsync, shuffleSources, manualFrames, hitTest, selectionGeometry
 import { photoSource, librarySource, sortLibraryPhotos, selectedLibraryPhotos } from './library.js';
 import { createPhotoRenderer, previewDimensions, renderDimensions, fitCanvasSize, smooth, createFrameScheduler, createTransformLayers } from './render.js';
 import { createHistory, historyShortcut } from './history.js';
+import { coverSizeLabel, removeCoverSize } from './settings.js';
 import { decodePreview, createPreviewCache } from './previews.js';
 import { emptySpacePercent } from './coverage.js';
 import { createPhotoViewer } from './viewer.js';
@@ -113,37 +114,52 @@ function focusCoverOption(option) {
 function positionCoverSizes() {
   const menu = $('#preset-menu'), trigger = $('#preset-trigger'), rect = trigger.getBoundingClientRect();
   menu.style.width = `${rect.width}px`;
+  const width = Math.min(Math.max(rect.width, 320), innerWidth - 16);
+  menu.style.width = `${width}px`;
   const height = menu.offsetHeight;
-  menu.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - rect.width - 8))}px`;
+  menu.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - width - 8))}px`;
   menu.style.top = `${Math.max(8, rect.bottom + height + 8 <= innerHeight ? rect.bottom + 6 : rect.top - height - 6)}px`;
 }
 function openCoverSizes() {
   $('#preset-menu').showPopover(); positionCoverSizes();
 }
-function coverSizeLabel(size) {
-  const name = size.width === 1920 && size.height === 768 ? 'VK' : size.width === 1400 && size.height === 280 ? 'Пикабу' : '';
-  return `${size.width} × ${size.height}${name ? ` (${name})` : ''}`;
-}
 function fillCoverSizes() {
   const input = $('#preset'), menu = $('#preset-menu');
   input.value = `${state.settings.width},${state.settings.height}`;
-  $('#preset-value').textContent = coverSizeLabel(state.settings);
+  const current = state.settings.coverSizes.find(size => size.width === state.settings.width && size.height === state.settings.height);
+  $('#preset-value').textContent = coverSizeLabel(current || state.settings);
   menu.replaceChildren();
-  const choices = [...state.settings.coverSizes.map(size => ({ value: `${size.width},${size.height}`, label: coverSizeLabel(size) })), { value: 'custom', label: 'Добавить размер…' }];
+  const choices = [...state.settings.coverSizes.map(size => ({ size, value: `${size.width},${size.height}`, label: coverSizeLabel(size) })), { value: 'custom', label: 'Добавить размер…' }];
   for (const choice of choices) {
-    const button = document.createElement('button'); button.type = 'button'; button.className = 'preset-option';
-    button.setAttribute('role', 'option'); button.setAttribute('aria-selected', String(choice.value === input.value));
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'preset-option preset-choice';
+    button.setAttribute('role', choice.size ? 'menuitemradio' : 'menuitem');
+    if (choice.size) button.setAttribute('aria-checked', String(choice.value === input.value));
     button.textContent = choice.label; button.dataset.value = choice.value;
     if (choice.value === 'custom') button.classList.add('preset-option-add');
     button.onclick = () => {
       input.value = choice.value; closeCoverSizes(true);
       if (choice.value !== 'custom') {
         $('#preset-value').textContent = choice.label;
-        menu.querySelectorAll('[role=option]').forEach(option => option.setAttribute('aria-selected', String(option === button)));
+        menu.querySelectorAll('[role=menuitemradio]').forEach(option => option.setAttribute('aria-checked', String(option === button)));
+        menu.querySelectorAll('.preset-row').forEach(row => row.classList.toggle('selected', row.contains(button)));
       }
       input.dispatchEvent(new Event('change', { bubbles: true }));
     };
-    menu.append(button);
+    if (!choice.size) { menu.append(button); continue; }
+    const row = document.createElement('div'); row.className = `preset-row${choice.value === input.value ? ' selected' : ''}`; row.setAttribute('role', 'none');
+    const actions = document.createElement('div'); actions.className = 'preset-actions'; actions.setAttribute('role', 'none');
+    for (const operation of ['rename', 'delete']) {
+      const edit = document.createElement('button'); edit.type = 'button'; edit.className = `preset-action preset-action-${operation}`;
+      edit.setAttribute('role', 'menuitem');
+      const label = `${operation === 'rename' ? 'Переименовать' : 'Удалить'} размер ${choice.label}`;
+      edit.setAttribute('aria-label', label); edit.title = label;
+      edit.innerHTML = operation === 'rename' ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg>' : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7"/></svg>';
+      edit.disabled = operation === 'delete' && state.settings.coverSizes.length === 1;
+      if (edit.disabled) edit.title = 'Нужно оставить хотя бы один размер холста';
+      edit.onclick = action(() => operation === 'rename' ? openSizeDialog(choice.size) : deleteCoverSize(choice.size));
+      actions.append(edit);
+    }
+    row.append(button, actions); menu.append(row);
   }
 }
 $('#preset-menu').addEventListener('beforetoggle', event => {
@@ -158,14 +174,19 @@ $('#preset-menu').addEventListener('toggle', event => {
 $('#preset-trigger').onkeydown = event => {
   if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
   event.preventDefault(); openCoverSizes();
-  const options = [...$('#preset-menu').querySelectorAll('[role=option]')];
-  focusCoverOption(options.find(option => option.getAttribute('aria-selected') === 'true') || options[0]);
+  const options = [...$('#preset-menu').querySelectorAll('.preset-choice')];
+  focusCoverOption(options.find(option => option.getAttribute('aria-checked') === 'true') || options[0]);
 };
 $('#preset-menu').onkeydown = event => {
   if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeCoverSizes(true); return; }
-  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  if (!['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault();
-  const options = [...$('#preset-menu').querySelectorAll('[role=option]')], index = options.indexOf(document.activeElement);
+  if (['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+    const row = document.activeElement.closest('.preset-row'); if (!row) return;
+    const buttons = [...row.querySelectorAll('button:not(:disabled)')], index = buttons.indexOf(document.activeElement);
+    focusCoverOption(buttons[(index + (event.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length]); return;
+  }
+  const options = [...$('#preset-menu').querySelectorAll('.preset-choice')], index = options.indexOf(document.activeElement.closest('.preset-row')?.querySelector('.preset-choice') || document.activeElement);
   const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
   focusCoverOption(options[next]);
 };
@@ -608,13 +629,7 @@ form.addEventListener('change', action(e => {
   if (e.target.dataset.range && !e.target.reportValidity()) return;
   if (e.target.id === 'preset' && e.target.value === 'custom') {
     fillCoverSizes();
-    const sizeForm = $('#size-form');
-    sizeForm.elements.width.value = state.settings.width;
-    sizeForm.elements.height.value = state.settings.height;
-    sizeForm.elements.height.setCustomValidity('');
-    $('#size-error').hidden = true;
-    $('#size-dialog').showModal();
-    sizeForm.elements.width.select();
+    openSizeDialog();
     return;
   }
   updateSettings();
@@ -630,6 +645,31 @@ $('#save-settings').onclick = action(async () => {
     toast('Настройки сохранены.');
   } finally { settingsSaving = false; updateSaveStatus(); }
 });
+let editingCoverSize = null;
+function openSizeDialog(size = null) {
+  closeCoverSizes(); editingCoverSize = size;
+  const sizeForm = $('#size-form'); sizeForm.reset();
+  sizeForm.elements.sizeName.value = size?.name || '';
+  sizeForm.elements.width.value = (size || state.settings).width;
+  sizeForm.elements.height.value = (size || state.settings).height;
+  sizeForm.elements.width.disabled = sizeForm.elements.height.disabled = Boolean(size);
+  sizeForm.elements.height.setCustomValidity('');
+  $('#size-dialog-title').textContent = size ? 'Переименовать размер' : 'Новый размер холста';
+  sizeForm.querySelector('button[type="submit"]').textContent = size ? 'Применить' : 'Добавить и выбрать';
+  $('#size-error').hidden = true; $('#size-dialog').showModal(); sizeForm.elements.sizeName.focus();
+  const nameInput = sizeForm.elements.sizeName;
+  nameInput.setSelectionRange(nameInput.value.length, nameInput.value.length);
+}
+async function deleteCoverSize(size) {
+  closeCoverSizes(true);
+  if (state.settings.coverSizes.length === 1) return;
+  const next = removeCoverSize(state.settings, size);
+  const changing = next.width !== state.settings.width || next.height !== state.settings.height;
+  const nextSize = next.coverSizes.find(saved => saved.width === next.width && saved.height === next.height);
+  if (!await confirmAction({ title: 'Удалить размер холста?', description: `Размер «${coverSizeLabel(size)}» будет удалён из списка.${changing ? ` Холст переключится на ${coverSizeLabel(nextSize)}.` : ''}\nЧтобы сохранить изменение, нажмите «Сохранить настройки».`, label: 'Удалить размер' })) return;
+  state.settings = removeCoverSize(state.settings, size);
+  fillCoverSizes(); updateLabels(); draw(); updateSaveStatus();
+}
 $('#close-size-dialog').onclick = $('#cancel-size').onclick = () => $('#size-dialog').close();
 $('#size-form').oninput = event => {
   const sizeForm = event.currentTarget;
@@ -638,16 +678,18 @@ $('#size-form').oninput = event => {
 $('#size-form').onsubmit = action(event => {
   event.preventDefault();
   const sizeForm = event.currentTarget, button = sizeForm.querySelector('button[type="submit"]'), error = $('#size-error');
-  const size = { width: Number(sizeForm.elements.width.value), height: Number(sizeForm.elements.height.value) };
-  const coverSizes = state.settings.coverSizes.some(saved => saved.width === size.width && saved.height === size.height) ? state.settings.coverSizes : [...state.settings.coverSizes, size];
+  const size = { width: Number(sizeForm.elements.width.value), height: Number(sizeForm.elements.height.value), name: sizeForm.elements.sizeName.value.trim() };
+  const exists = state.settings.coverSizes.some(saved => saved.width === size.width && saved.height === size.height);
   button.disabled = true; error.hidden = true;
   try {
+    if (!editingCoverSize && exists) throw new Error('Такой размер уже есть в списке. Переименовать его можно кнопкой в выпадающем списке.');
+    const coverSizes = editingCoverSize ? state.settings.coverSizes.map(saved => saved.width === editingCoverSize.width && saved.height === editingCoverSize.height ? size : saved) : [...state.settings.coverSizes, size];
     if (coverSizes.length > 100) throw new Error('Можно добавить до 100 размеров обложки');
-    state.settings = { ...readSettings(), ...size, coverSizes };
+    state.settings = { ...readSettings(), ...(!editingCoverSize ? { width: size.width, height: size.height } : {}), coverSizes };
     fillCoverSizes(); updateLabels(); draw(); updateSaveStatus();
-    $('#size-dialog').close(); toast('Размер выбран. Нажмите «Сохранить настройки», чтобы сохранить его.');
+    $('#size-dialog').close();
   } catch (e) { error.textContent = e.message; error.hidden = false; }
-  finally { button.disabled = false; button.textContent = 'Добавить и выбрать'; }
+  finally { button.disabled = false; }
 });
 $('#generate').onclick = action(() => shuffle());
 $('#clear-canvas').onclick = action(async () => {

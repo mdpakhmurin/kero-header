@@ -206,17 +206,33 @@ dialog a { font-size: 12px; color: var(--accent); }
 .confirm-body img { width: 82px; height: 82px; object-fit: contain; flex-shrink: 0; border-radius: 8px; background: #f3f5f7; border: 1px solid var(--line); }
 .confirm-body p { margin: 0; color: #697789; line-height: 1.7; }
 .confirm-dialog .dialog-footer { justify-content: flex-end; }
+#exclude-description { white-space: pre-line; }
 .confirm-dialog .button.danger { background: #a8564b; color: #fff; border-color: #a8564b; }
 .confirm-dialog .button.danger:hover { background: #92473d; }
 
 @media (hover:none) { .photo-actions { opacity: 1; transform: translate(-50%,0); pointer-events: auto; } }
+.preset-row { display: flex; align-items: center; gap: 3px; border-radius: 5px; }
+.preset-row.selected { background: #edf2f9; }
+.preset-row:hover, .preset-row:focus-within { background: #f2f5f9; }
+.preset-row.selected:hover, .preset-row.selected:focus-within { background: #e5edf9; }
+.preset-row .preset-choice { flex: 1; min-width: 0; width: auto; }
+.preset-row .preset-choice:hover, .preset-row .preset-choice:focus-visible { background: transparent; }
+.preset-row.selected .preset-choice { color: #365782; font-weight: 550; }
+.preset-actions { display: flex; flex-shrink: 0; gap: 2px; padding-right: 4px; }
+.preset-action { display: grid; place-items: center; width: 26px; height: 26px; padding: 5px; border: 0; border-radius: 5px; color: #8a95a3; background: transparent; }
+.preset-action:hover, .preset-action:focus-visible { background: #e5edf9; color: var(--accent); }
+.preset-action-delete:hover, .preset-action-delete:focus-visible { background: #f8e9e6; color: #a8564b; }
+.preset-action:disabled { opacity: .3; background: transparent; color: #8a95a3; }
+.preset-action svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .preset-trigger { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 10px; border: 1px solid #dfe4e9; border-radius: 7px; background: #fff; color: var(--text); font-size: 12px; text-align: left; }
+.preset-trigger>span { min-width: 0; overflow-wrap: anywhere; }
+.preset-trigger>svg { flex-shrink: 0; }
 .preset-trigger:hover { border-color: #bcc8d6; background: #fbfcfe; }
 .preset-trigger:focus-visible, .preset-trigger[aria-expanded=true] { outline: none; border-color: #aebed1; }
 .preset-trigger svg { width: 16px; height: 16px; stroke: #8491a0; stroke-width: 1.6; fill: none; }
 .preset-trigger[aria-expanded=true] svg { transform: rotate(180deg); }
 .preset-menu { position: fixed; inset: auto; margin: 0; padding: 5px; max-height: min(300px,calc(100dvh - 24px)); overflow-y: auto; border: 1px solid #dfe5ec; border-radius: 9px; background: #fff; box-shadow: 0 8px 28px #1f31441c; color: var(--text); }
-.preset-option { display: block; width: 100%; padding: 9px 10px; border: 0; border-radius: 5px; background: transparent; color: #566475; text-align: left; font-size: 12px; }
+.preset-option { display: block; width: 100%; padding: 9px 10px; border: 0; border-radius: 5px; background: transparent; color: #566475; text-align: left; font-size: 12px; overflow-wrap: anywhere; }
 .preset-option:hover, .preset-option:focus-visible { outline: none; background: #f2f5f9; }
 .preset-option[aria-selected=true] { background: #edf2f9; color: #365782; font-weight: 550; }
 .preset-option-add { margin-top: 4px; border-top: 1px solid var(--line); border-radius: 0 0 5px 5px; color: var(--accent); }

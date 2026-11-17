@@ -9,7 +9,7 @@ import { syncLibrary, paginate, wallPhotos, createVK, connectionError } from '..
 import { createApp } from '../server.mjs';
 import { generate, hitTest } from '../public/collage.js';
 import { photoSource } from '../public/library.js';
-import { photoSizeRange } from '../public/settings.js';
+import { photoSizeRange, coverSizeLabel, removeCoverSize } from '../public/settings.js';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64');
 async function fixture(t) { const root = await mkdtemp(join(tmpdir(), 'kero-test-')); t.after(() => rm(root, { recursive: true, force: true })); return root; }
@@ -133,7 +133,7 @@ test('settings and layout reject invalid dimensions and path-like IDs', () => {
 
 test('saved cover sizes are validated, deduplicated and include the current dimensions', () => {
   const migrated = validateSettings({ width: 1200, height: 500 });
-  assert.deepEqual(migrated.coverSizes, [...defaults.coverSizes, { width: 1200, height: 500 }]);
+  assert.deepEqual(migrated.coverSizes, [...defaults.coverSizes, { width: 1200, height: 500, name: '' }]);
   const settings = validateSettings({ ...defaults, coverSizes: [...defaults.coverSizes, defaults.coverSizes[0]] });
   assert.deepEqual(settings.coverSizes, defaults.coverSizes);
   for (const size of [{ width: 0, height: 400 }, { width: 1200.5, height: 500 }, { width: 8192, height: 8192 }, null]) {
@@ -141,6 +141,61 @@ test('saved cover sizes are validated, deduplicated and include the current dime
   }
   assert.throws(() => validateSettings({ ...defaults, coverSizes: '1200x500' }));
   assert.throws(() => validateSettings({ ...defaults, coverSizes: Array(101).fill(defaults.coverSizes[0]) }));
+});
+
+test('size names migrate from legacy presets, can be renamed or cleared, and are validated', () => {
+  const legacy = validateSettings({ coverSizes: [{ width: 1920, height: 768 }, { width: 1400, height: 280 }] });
+  assert.deepEqual(legacy.coverSizes, defaults.coverSizes);
+  const renamed = validateSettings({ coverSizes: [{ width: 1920, height: 768, name: '  Мой паблик  ' }, { width: 1400, height: 280, name: '' }] });
+  assert.equal(renamed.coverSizes[0].name, 'Мой паблик');
+  assert.equal(renamed.coverSizes[1].name, '');
+  assert.equal(coverSizeLabel(renamed.coverSizes[0]), '1920 × 768 (Мой паблик)');
+  assert.equal(coverSizeLabel(renamed.coverSizes[1]), '1400 × 280');
+  for (const name of [null, 42, {}, 'x'.repeat(81), 'Первая\nвторая']) {
+    assert.throws(() => validateSettings({ coverSizes: [{ width: 1200, height: 500, name }] }), /Название размера/);
+  }
+});
+
+test('removing canvas sizes preserves selection where possible and protects the last preset', () => {
+  const settings = { ...defaults, coverSizes: [...defaults.coverSizes, { width: 1200, height: 500, name: 'Баннер' }] };
+  const inactive = removeCoverSize(settings, settings.coverSizes[2]);
+  assert.equal(inactive.width, settings.width); assert.equal(inactive.height, settings.height);
+  assert.deepEqual(inactive.coverSizes, defaults.coverSizes);
+  const active = removeCoverSize(inactive, inactive.coverSizes[0]);
+  assert.equal(active.width, 1400); assert.equal(active.height, 280);
+  assert.deepEqual(active.coverSizes, [defaults.coverSizes[1]]);
+  assert.throws(() => removeCoverSize(active, active.coverSizes[0]), /хотя бы один/);
+  assert.equal(removeCoverSize(active, { width: 100, height: 100 }), active);
+  assert.equal(settings.coverSizes.length, 3);
+});
+
+test('custom size names, renamed presets and deleted sizes persist across server restarts', async t => {
+  const root = await fixture(t);
+  const coverSizes = [{ width: 1920, height: 768, name: 'Новый VK' }, { width: 1400, height: 280, name: '' }, { width: 1200, height: 500, name: 'Мой формат' }];
+  let server = await createApp(root);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...defaults, width: 1200, height: 500, coverSizes }) });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).coverSizes, coverSizes);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+  assert.deepEqual(JSON.parse(await readFile(join(root, 'config/settings.json'), 'utf8')).coverSizes, coverSizes);
+  server = await createApp(root);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const state = await (await fetch(`http://127.0.0.1:${server.address().port}/api/state`)).json();
+    assert.deepEqual(state.settings.coverSizes, coverSizes);
+    const removed = removeCoverSize(state.settings, coverSizes[2]);
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(removed) });
+    assert.equal(response.status, 200);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+  server = await createApp(root);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const state = await (await fetch(`http://127.0.0.1:${server.address().port}/api/state`)).json();
+    assert.deepEqual(state.settings.coverSizes, coverSizes.slice(0, 2));
+    assert.equal(state.settings.width, 1400); assert.equal(state.settings.height, 280);
+  } finally { await new Promise(resolve => server.close(resolve)); }
 });
 test('pagination continues across pages; repost attachments are included', async () => {
   const offsets = [], result = [];
@@ -250,7 +305,7 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   const importedPhoto = (await (await fetch(base + '/api/state')).json()).photos.find(photo => photo.id === id);
   assert.equal(importedPhoto.version, digest(png));
   assert.equal('url' in importedPhoto, false);
-  const coverSizes = [...defaults.coverSizes, { width: 1600, height: 600 }];
+  const coverSizes = [...defaults.coverSizes, { width: 1600, height: 600, name: '' }];
   const savedSettings = await (await post('/api/settings', { ...defaults, rotation: 50, layoutOrder: 'newest', seed: 42, scatter: 100, width: 1600, height: 600, coverSizes })).json();
   assert.equal('seed' in savedSettings, false);
   const savedFile = JSON.parse(await readFile(join(root, 'config/settings.json'), 'utf8'));

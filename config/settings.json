@@ -7,18 +7,16 @@
   "coverSizes": [
     {
       "width": 1920,
-      "height": 768
-    },
-    {
-      "width": 1590,
-      "height": 400
+      "height": 768,
+      "name": "VK"
     },
     {
       "width": 1400,
-      "height": 280
+      "height": 280,
+      "name": "Пикабу"
     }
   ],
-  "photoSize": 165,
+  "photoSize": 170,
   "sizeDeviation": 20,
   "rotation": 125,
   "count": 0,

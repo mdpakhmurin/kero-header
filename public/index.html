@@ -11,8 +11,8 @@
         <div class="controls-heading"><h1>Параметры</h1><button id="toggle-parameters" class="icon-button" type="button" aria-label="Скрыть параметры" title="Скрыть параметры" aria-controls="parameters-content" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/><path class="panel-chevron" d="m16 9-3 3 3 3"/></svg></button></div>
         <form id="settings-form">
           <section class="control-section">
-          <div class="field-label"><span id="preset-label">Размер холста</span><input id="preset" type="hidden" value="1920,768"><button id="preset-trigger" class="preset-trigger" type="button" popovertarget="preset-menu" popovertargetaction="toggle" aria-labelledby="preset-label preset-value" aria-haspopup="listbox" aria-controls="preset-menu" aria-expanded="false"><span id="preset-value">1920 × 768 (VK)</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button></div>
-          <div id="preset-menu" class="preset-menu" popover="auto" role="listbox" aria-label="Размер холста"></div>
+          <div class="field-label"><span id="preset-label">Размер холста</span><input id="preset" type="hidden" value="1920,768"><button id="preset-trigger" class="preset-trigger" type="button" popovertarget="preset-menu" popovertargetaction="toggle" aria-labelledby="preset-label preset-value" aria-haspopup="menu" aria-controls="preset-menu" aria-expanded="false"><span id="preset-value"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg></button></div>
+          <div id="preset-menu" class="preset-menu" popover="auto" role="menu" aria-label="Размер холста"></div>
           </section>
           <section class="control-section"><h2>Фотографии</h2>
           <div class="range-label"><label for="photo-size-slider">Размер фотографий</label><span class="range-value"><input id="photo-size-out" type="number" data-range="photoSize" min="20" max="800" step="1" required aria-label="Размер фотографий, px"><span>px</span></span><input id="photo-size-slider" name="photoSize" type="range" min="20" max="800" step="1"></div>
@@ -81,7 +81,8 @@
   <dialog id="size-dialog" aria-labelledby="size-dialog-title">
     <form id="size-form">
       <div class="dialog-heading"><h2 id="size-dialog-title">Новый размер холста</h2><button type="button" id="close-size-dialog" class="icon-button" aria-label="Закрыть настройку размера">×</button></div>
-      <p>Новый размер сразу применится к обложке. Чтобы оставить его в списке после перезапуска, нажмите «Сохранить настройки» в панели слева.</p>
+      <p>Изменения применятся сразу.<br>Чтобы сохранить их после перезапуска, нажмите «Сохранить настройки» в панели слева.</p>
+      <label class="field-label">Название<input name="sizeName" type="text" maxlength="80" placeholder="Например, Обложка сообщества" autocomplete="off"></label>
       <div class="pair"><label>Ширина, px<input name="width" type="number" min="100" max="8192" step="1" required></label><span>×</span><label>Высота, px<input name="height" type="number" min="100" max="8192" step="1" required></label></div>
       <div id="size-error" class="sync-status error" role="alert" hidden></div>
       <div class="dialog-footer"><button type="button" id="cancel-size" class="button light">Отмена</button><button type="submit" class="button accent">Добавить и выбрать</button></div>
