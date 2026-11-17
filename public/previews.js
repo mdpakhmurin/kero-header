@@ -8,10 +8,10 @@ export function previewCacheKey(photo) {
 
 // Storage is optional (private browsing, quota limits, etc.). Never let a cache
 // failure prevent editing. Only lossless, resized previews are stored here.
-export function createPreviewCache({ storage = globalThis.caches, busy = () => false } = {}) {
+export function createPreviewCache({ storage = globalThis.caches, busy = () => false, cacheName = CACHE_NAME } = {}) {
   let opened, timer, writing = false;
   const pending = new Map();
-  const open = () => opened ||= Promise.resolve().then(() => storage?.open(CACHE_NAME)).catch(() => null);
+  const open = () => opened ||= Promise.resolve().then(() => storage?.open(cacheName)).catch(() => null);
   async function trim(cache, allowed) {
     let bytes = 0;
     for (const key of (await cache.keys()).reverse()) {

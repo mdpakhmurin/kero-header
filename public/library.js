@@ -32,7 +32,7 @@ export function photoSource(photo) {
   const vk = /^vk_(-?\d+)_(\d+)$/.exec(photo.id);
   if (vk) return { href: `https://vk.ru/photo${vk[1]}_${vk[2]}`, label: 'Открыть фото VK' };
   if (photo.available && /^local_[a-f0-9]{64}$/.test(photo.id)) {
-    return { href: `/images/${photo.id}`, label: 'Открыть изображение' };
+    return { href: photo.src?.startsWith('blob:') ? photo.src : `/images/${photo.id}`, label: 'Открыть изображение' };
   }
   return null;
 }

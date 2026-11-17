@@ -6,7 +6,21 @@ import { coverSizeLabel, removeCoverSize } from './settings.js';
 import { decodePreview, createPreviewCache } from './previews.js';
 import { emptySpacePercent } from './coverage.js';
 import { createPhotoViewer } from './viewer.js';
+import { initialMode, createClient, createDemoBackend } from './demo.js';
 const $ = selector => document.querySelector(selector);
+let rememberedMode;
+try { rememberedMode = localStorage.getItem('kero.mode'); } catch {}
+const mode = initialMode(location.search, rememberedMode), demoMode = mode === 'demo';
+const demoBackend = demoMode ? createDemoBackend() : null;
+const client = createClient({ demoMode, demo: demoBackend });
+document.body.dataset.mode = mode;
+if (demoMode) {
+  const policy = document.createElement('meta');
+  policy.httpEquiv = 'Content-Security-Policy'; policy.content = "connect-src 'none'";
+  document.head.append(policy);
+}
+try { localStorage.setItem('kero.mode', mode); } catch {}
+window.addEventListener('pagehide', event => { if (!event.persisted) demoBackend?.dispose(); });
 const canvas = $('#canvas'), ctx = canvas.getContext('2d'), form = $('#settings-form');
 const preview = document.createElement('canvas'), photoRenderer = createPhotoRenderer();
 const transformLayers = createTransformLayers(), editorFrames = createFrameScheduler(() => { try { renderEditor(); } catch (error) { report(error); } });
@@ -32,17 +46,14 @@ let measuringLibrary = false;
 const failedMeasurements = new Set();
 let exporting = false, coverUploading = false, coverPayload = null, coverPreviewUrl, coverSession = 0;
 let historyQueue = Promise.resolve();
-let libraryOrigin = 'vk';
+let libraryOrigin = demoMode ? 'local' : 'vk';
 const librarySort = { vk: { key: 'date', direction: 'desc' }, local: { key: 'ratio', direction: 'desc' } };
 const librarySizes = new Map();
-const previewCache = createPreviewCache({ busy: () => loading || generating || exporting || Boolean(drag || wheelTimer) });
+const previewCache = createPreviewCache({ cacheName: demoMode ? 'kero-demo-previews-v1' : 'kero-previews-v1', busy: () => loading || generating || exporting || Boolean(drag || wheelTimer) });
 const numeric = ['rotation', 'border', 'shadow'];
 const numberInputs = [...form.querySelectorAll('input[data-range]')];
 async function api(path, data) {
-  const response = await fetch(`/api/${path}`, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || 'Ошибка сервера');
-  return result;
+  return client.request(path, data);
 }
 function toast(message, error = false) { const el = $('#toast'); el.textContent = message; el.classList.toggle('error', error); el.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => el.hidden = true, error ? 9000 : 4000); }
 function report(error) { toast(error.message, true); }
@@ -259,9 +270,7 @@ async function performImageLoad(generationPhotos, onProgress) {
       try {
         let decoded = await previewCache.read(photo);
         if (!decoded) {
-          const response = await fetch(photo.src);
-          if (!response.ok) throw new Error();
-          decoded = await decodePreview(await response.blob(), photo);
+          decoded = await decodePreview(await client.photoBlob(photo), photo);
           previewCache.remember(photo, decoded);
         }
         bitmap = decoded.image;
@@ -374,7 +383,7 @@ function renderEditor() {
   }
   $('#canvas-count').textContent = visible.length;
   $('#canvas-empty-state').hidden = visible.length > 0;
-  $('#community-link').href = `https://vk.ru/${encodeURIComponent(s.community)}`;
+  if (!demoMode) $('#community-link').href = `https://vk.ru/${encodeURIComponent(s.community)}`;
   $('#dimensions').textContent = `${s.width} × ${s.height}`;
   if (!generating) {
     $('#export').disabled = $('#install-cover').disabled = !visible.length || loading || exporting;
@@ -423,6 +432,7 @@ function photoIcon(name) {
 }
 function renderLibrary({ append = false } = {}) {
   if (!libraryDialog.open) return;
+  if (demoMode) libraryOrigin = 'local';
   if (!append && libraryFrame !== null) { cancelAnimationFrame(libraryFrame); libraryFrame = null; }
   const knownSelection = new Set([...state.photos.map(photo => photo.id), ...state.exclusions]);
   for (const id of libraryChosen) if (!knownSelection.has(id)) libraryChosen.delete(id);
@@ -559,10 +569,12 @@ $('#library-exclude').onclick = action(async () => {
     libraryChosen.clear(); if (restoring) await loadImages(); draw(); renderLibrary();
   } finally { libraryBusy = false; updateLibrarySelection(); }
 });
-function confirmAction({ title, description, label, photo }) {
+function confirmAction({ title, description, label, photo, danger = true }) {
   const dialog = $('#exclude-dialog'), image = $('#exclude-preview');
   $('#exclude-title').textContent = title; $('#exclude-description').textContent = description;
   dialog.querySelector('button[value=exclude]').textContent = label;
+  dialog.querySelector('button[value=exclude]').classList.toggle('danger', danger);
+  dialog.querySelector('button[value=exclude]').classList.toggle('accent', !danger);
   image.hidden = !photo?.available;
   if (photo?.available) image.src = photo.src; else image.removeAttribute('src');
   dialog.returnValue = '';
@@ -808,7 +820,7 @@ window.addEventListener('keydown', event => {
 });
 async function renderCoverBlob() {
   const exportItems = structuredClone(visibleItems()), s = structuredClone(state.settings);
-  const sources = new Map(state.photos.map(photo => [photo.id, photo.src]));
+  const sources = new Map(state.photos.map(photo => [photo.id, photo]));
   if (!exportItems.length) throw new Error('Сначала добавьте фотографии на холст');
   let surface, output;
   try {
@@ -820,9 +832,7 @@ async function renderCoverBlob() {
     context.setTransform(scale, 0, 0, surface.height / s.height, 0, 0);
     context.fillStyle = s.background; context.fillRect(0, 0, s.width, s.height);
     for (const item of exportItems) {
-      const response = await fetch(sources.get(item.id));
-      if (!response.ok) throw new Error('В кеше отсутствует фото. Синхронизируйте библиотеку перед экспортом.');
-      const image = await createImageBitmap(await response.blob());
+      const image = await createImageBitmap(await client.photoBlob(sources.get(item.id)));
       try { photoRenderer.draw(context, item, image, s, scale); }
       finally { photoRenderer.release(image); image.close(); }
     }
@@ -852,6 +862,7 @@ const coverDialog = $('#cover-dialog'), coverForm = $('#cover-form');
 function updateCoverSubmit() { $('#cover-submit').disabled = !coverPayload || !state.hasToken || coverUploading; }
 function showCoverError(message) { $('#cover-error').textContent = message; $('#cover-error').hidden = false; }
 $('#install-cover').onclick = action(async () => {
+  if (demoMode) return;
   if (exporting || generating || loading) return;
   const session = ++coverSession;
   coverPayload = null; $('#cover-error').hidden = true;
@@ -901,6 +912,7 @@ document.querySelectorAll('.filter').forEach(button => button.onclick = () => {
   if (filter !== button.dataset.filter) changeLibraryView(() => { filter = button.dataset.filter; });
 });
 document.querySelectorAll('.source-tab').forEach(button => button.onclick = () => {
+  if (demoMode && button.dataset.source === 'vk') return;
   if (libraryOrigin !== button.dataset.source) changeLibraryView(() => { libraryOrigin = button.dataset.source; });
 });
 document.querySelectorAll('[data-sort]').forEach(button => button.onclick = () => changeLibraryView(() => {
@@ -914,7 +926,7 @@ $('#delete-files').onclick = action(async () => {
   const title = source === 'vk' ? 'Очистить файлы из VK?' : 'Очистить добавленные файлы?';
   const description = source === 'vk'
     ? 'Будут удалены скачанные файлы VK, включая исключённые'
-    : 'Все добавленные с компьютера фотографии, включая исключённые, будут удалены из библиотеки проекта.';
+    : demoMode ? 'Все загруженные фотографии, включая исключённые, будут удалены из хранилища этого браузера.' : 'Все добавленные с компьютера фотографии, включая исключённые, будут удалены из библиотеки проекта.';
   if (!await confirmAction({ title, description, label: 'Очистить файлы' })) return;
   const button = $('#delete-files'); button.disabled = true;
   try {
@@ -938,8 +950,13 @@ $('#file-input').onchange = action(async event => {
       try {
         if (file.size > 30_000_000) throw new Error('больше 30 МБ');
         const bitmap = await createImageBitmap(file), dimensions = { width: bitmap.width, height: bitmap.height }; bitmap.close();
-        const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result.split(',')[1]); reader.onerror = reject; reader.readAsDataURL(file); });
-        const result = await api('import', { name: file.name, data }); librarySizes.set(result.id, Promise.resolve(dimensions)); imported++;
+        let input;
+        if (demoMode) input = { file, dimensions };
+        else {
+          const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result.split(',')[1]); reader.onerror = reject; reader.readAsDataURL(file); });
+          input = { name: file.name, data };
+        }
+        const result = await api('import', input); librarySizes.set(result.id, Promise.resolve(dimensions)); imported++;
       } catch (e) { errors.push(`${file.name}: ${e.message || 'не удалось прочитать изображение'}`); }
     }
     if (imported) { libraryOrigin = 'local'; filter = 'active'; }
@@ -948,6 +965,7 @@ $('#file-input').onchange = action(async event => {
   } finally { $('#import').disabled = false; event.target.value = ''; }
 });
 function openConnection() {
+  if (demoMode) return;
   const f = $('#connect-form'); f.elements.community.value = `https://vk.ru/${state.settings.community}`; f.elements.source.value = state.settings.source; f.elements.token.value = '';
   f.elements.token.placeholder = state.hasToken ? 'Токен уже задан. Оставьте пустым, чтобы сохранить.' : 'Вставьте токен VK'; $('#connect-dialog').showModal();
   $('#connection-error').hidden = true;
@@ -974,6 +992,7 @@ $('#connect-form').onsubmit = action(async event => {
 $('#forget-token').onclick = action(async () => { await api('token', { token: '' }); state.hasToken = false; updateCoverSubmit(); $('#connect-form').elements.token.value = ''; $('#connect-form').elements.token.placeholder = 'Вставьте токен VK'; toast('Токен удалён из памяти сервера. Если он задан в .env, удалите его и там.'); });
 $('#sync').onclick = action(async () => { if (!state.hasToken) { openConnection(); return; } await saveQueue; await api('sync', {}); pollSync(); });
 async function pollSync() {
+  if (demoMode) return;
   if (polling) return; polling = true; $('#sync').disabled = true;
   try {
     while (true) {
@@ -1010,4 +1029,27 @@ const editorResizeObserver = new ResizeObserver(schedulePreviewResize);
 editorResizeObserver.observe(canvasWrap); editorResizeObserver.observe($('.editor-top'));
 window.addEventListener('resize', schedulePreviewResize);
 window.addEventListener('scroll', () => { canvasBounds = null; }, true);
+$('#demo-badge').hidden = !demoMode;
+if (demoMode) {
+  $('#community-link').removeAttribute('href'); $('#community-link').removeAttribute('aria-label');
+  $('#install-cover').hidden = true;
+  $('[data-source=vk]').hidden = true;
+  $('#vk-actions').hidden = true;
+}
+let switchingMode = false;
+document.querySelectorAll('[data-mode-choice]').forEach(button => {
+  const target = button.dataset.modeChoice;
+  button.setAttribute('aria-pressed', String(target === mode));
+  button.onclick = action(async () => {
+    if (target === mode || switchingMode) return;
+    if (!state || loading || generating || exporting || settingsSaving || libraryBusy || coverUploading || polling || state.sync.running || $('#import').disabled) { toast('Дождитесь завершения текущей операции'); return; }
+    switchingMode = true;
+    try {
+      if ((items.length || hasUnsavedSettings()) && !await confirmAction({ title: 'Переключить режим?', description: 'Текущий холст и несохранённые настройки будут сброшены. Фотографии и сохранённые настройки каждого режима хранятся отдельно.', label: 'Переключить', danger: false })) return;
+      await saveQueue;
+      const url = new URL(location.href); url.searchParams.set('mode', target);
+      location.assign(url.href);
+    } finally { switchingMode = false; }
+  });
+});
 await refresh().catch(report);
