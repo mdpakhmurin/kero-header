@@ -1,6 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { librarySource, sortLibraryPhotos, selectedLibraryPhotos } from '../public/library.js';
+import { librarySource, sortLibraryPhotos, selectedLibraryPhotos, createFavoritesView } from '../public/library.js';
+
+test('unstarred photos remain in the current favorites view across sorting and lazy loading', () => {
+  const view = createFavoritesView(), favorites = new Set(['one', 'two', 'three']);
+  assert.deepEqual([...view.ids(favorites, 'vk')], ['one', 'two', 'three']);
+  favorites.delete('two');
+  assert.equal(favorites.has('two'), false);
+  assert.deepEqual([...view.ids(favorites, 'vk')], ['one', 'two', 'three']);
+  assert.deepEqual([...view.ids(favorites, 'vk')], ['one', 'two', 'three']);
+  favorites.add('four'); assert.equal(view.ids(favorites, 'vk').has('four'), true);
+  view.ids(favorites, null);
+  assert.deepEqual([...view.ids(favorites, 'vk')], ['one', 'three', 'four']);
+});
+
+test('leaving the source or closing the library clears temporarily retained favorites', () => {
+  const view = createFavoritesView(); view.ids(['vk_photo'], 'vk');
+  assert.equal(view.ids([], 'vk').has('vk_photo'), true);
+  assert.deepEqual([...view.ids(['local_photo'], 'local')], ['local_photo']);
+  assert.equal(view.ids([], 'vk').has('vk_photo'), false);
+  view.ids(['vk_photo'], 'vk'); view.reset();
+  assert.equal(view.ids([], 'vk').has('vk_photo'), false);
+});
 
 test('library sorts aspect ratios independently of pixel area and leaves unknown dimensions last', () => {
   const photos = [{ id: 'unknown' }, { id: 'wide', width: 1000, height: 20 }, { id: 'square', width: 2000, height: 2000 }, { id: 'portrait', width: 100, height: 300 }];

@@ -1,25 +1,27 @@
 import http from 'node:http';
-import { readFile, stat, readdir, unlink, mkdir } from 'node:fs/promises';
+import { readFile, stat, readdir, unlink, mkdir, rm } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeJSON, validateSettings, validId, digest, saveImage, imagePath, readImage } from './lib/storage.mjs';
 import { syncLibrary, createVK } from './lib/vk.mjs';
 import { openFolder } from './lib/folder.mjs';
 import { coverCommunity, coverImage, installCover } from './lib/cover.mjs';
-import { createAccounts, publicUser } from './lib/accounts.mjs';
+import { createAccounts } from './lib/accounts.mjs';
 import { createMediaStore } from './lib/media.mjs';
 import { loadWorkspace } from './lib/workspaces.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 try { process.loadEnvFile(join(here, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 
-export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder, coverInstaller = installCover, requireAuth = true, imageDownloader } = {}) {
+export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder, coverInstaller = installCover, requireAuth = true, imageDownloader, globalAdminIds = (process.env.GLOBAL_ADMIN_IDS || '').split(',') } = {}) {
   root = resolve(root);
-  const accounts = requireAuth ? await createAccounts(root) : null;
+  const accounts = requireAuth ? await createAccounts(root, { globalAdminIds }) : null;
+  const deletingUsers = new Set();
   const shared = requireAuth ? await createMediaStore(root) : null, workspaces = new Map();
   const legacy = requireAuth ? null : await loadWorkspace(root, { token: process.env.VK_TOKEN || '' });
   function workspaceFor(user) {
     if (!requireAuth) return legacy;
+    if (deletingUsers.has(user.id)) throw Object.assign(new Error('Аккаунт удаляется'), { status: 401 });
     if (!workspaces.has(user.id)) workspaces.set(user.id, loadWorkspace(join(root, 'data/users', user.id), { shared, legacyRoot: root, inheritLegacy: user.legacyOwner, token: user.legacyOwner ? process.env.VK_TOKEN || '' : '' }).catch(error => { workspaces.delete(user.id); throw error; }));
     return workspaces.get(user.id);
   }
@@ -32,7 +34,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
     return JSON.parse(Buffer.concat(chunks).toString());
   }
   async function api(req, res, path, workspace) {
-    let { root, settings, exclusions, library, token, sync } = workspace;
+    let { root, settings, exclusions, favorites, library, token, sync } = workspace;
     try {
     if (req.method === 'GET' && path === '/api/state') {
       const photos = await Promise.all(Object.values(library.photos).map(async p => {
@@ -41,7 +43,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
         const { url, hash, ...publicPhoto } = p;
         return { ...publicPhoto, available, version: hash, src: `/images/${p.id}` };
       }));
-      return json(res, 200, { settings, exclusions, photos, lastSync: library.lastSync, hasToken: Boolean(token), sync });
+      return json(res, 200, { settings, exclusions, favorites, photos, lastSync: library.lastSync, hasToken: Boolean(token), sync });
     }
     if (req.method === 'GET' && path === '/api/sync') return json(res, 200, sync);
     if (req.method !== 'POST') return json(res, 404, { error: 'Не найдено' });
@@ -53,6 +55,11 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       return json(res, 200, await coverInstaller({ community, image, call: vkFactory(token) }));
     }
     if (path === '/api/settings') { const next = validateSettings(input); await writeJSON(join(root, 'config/settings.json'), next); settings = next; return json(res, 200, settings); }
+    if (path === '/api/favorites') {
+      if (!Array.isArray(input) || input.length > 100000 || !input.every(id => validId(id) && library.photos[id])) throw new Error('Выберите фотографии своей библиотеки');
+      const next = [...new Set(input)].sort(); await writeJSON(join(root, 'config/favorites.json'), next); favorites = next;
+      return json(res, 200, favorites);
+    }
     if (path === '/api/images/open-folder') {
       if (workspace.shared) return json(res, 403, { error: 'Папки сервера недоступны из пользовательской библиотеки' });
       const directory = join(root, 'cache/images');
@@ -68,6 +75,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
         if (input.source === 'local') exclusions.filter(id => id.startsWith('local_')).forEach(id => ids.add(id));
         for (const id of ids) { if (input.source === 'local') delete library.photos[id]; else library.photos[id].stored = false; }
         if (input.source === 'local') exclusions = exclusions.filter(id => !ids.has(id));
+        if (input.source === 'local') { favorites = favorites.filter(id => !ids.has(id)); await writeJSON(join(root, 'config/favorites.json'), favorites); }
         await writeJSON(join(root, 'cache/library.json'), library);
         if (input.source === 'local') await writeJSON(join(root, 'config/exclusions.json'), exclusions);
         await workspace.shared.collect();
@@ -89,6 +97,8 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       if (input.source === 'local') {
         for (const id of ids) delete library.photos[id];
         exclusions = exclusions.filter(id => !ids.has(id));
+        favorites = favorites.filter(id => !ids.has(id));
+        await writeJSON(join(root, 'config/favorites.json'), favorites);
         await writeJSON(join(root, 'cache/library.json'), library);
         await writeJSON(join(root, 'config/exclusions.json'), exclusions);
       }
@@ -131,7 +141,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       return json(res, 200, { id });
     }
     return json(res, 404, { error: 'Не найдено' });
-    } finally { Object.assign(workspace, { settings, exclusions, library, token, sync }); }
+    } finally { Object.assign(workspace, { settings, exclusions, favorites, library, token, sync }); }
   }
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -144,11 +154,39 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       const path = new URL(req.url, `http://${req.headers.host}`).pathname;
       if (path.startsWith('/api/')) {
         const handle = async () => {
-          if (path === '/api/auth/session' && req.method === 'GET') return json(res, 200, { user: requireAuth ? publicUser(accounts.current(req)) : { id: 'local-preview', login: 'Локальный просмотр' } });
+          if (path === '/api/auth/session' && req.method === 'GET') return json(res, 200, { user: requireAuth ? accounts.describe(accounts.current(req)) : { id: 'local-preview', login: 'Локальный просмотр', hasFullAccess: true } });
+          if (path === '/api/auth/policy' && req.method === 'GET') return json(res, 200, requireAuth ? accounts.registrationPolicy() : { openRegistration: true });
           if (['/api/auth/register', '/api/auth/login'].includes(path) && req.method === 'POST' && requireAuth) return json(res, 200, { user: await accounts.authenticate(req, res, await body(req, 4096), path.endsWith('/register')) });
           if (path === '/api/auth/logout' && req.method === 'POST' && requireAuth) { await body(req, 4096); await accounts.logout(req, res); return json(res, 200, { loggedOut: true }); }
           const user = requireAuth ? accounts.current(req) : null;
-          if (requireAuth && !user) return json(res, 401, { error: 'Войдите в аккаунт или продолжите в демо-режиме' });
+          if (requireAuth && (!user || deletingUsers.has(user.id))) return json(res, 401, { error: 'Войдите в аккаунт или продолжите в демо-режиме' });
+          if (path.startsWith('/api/admin/')) {
+            if (!requireAuth) return json(res, 403, { error: 'Администрирование недоступно в тестовом режиме' });
+            if (path === '/api/admin/state' && req.method === 'GET') return json(res, 200, accounts.adminState(user));
+            if (req.method !== 'POST') return json(res, 404, { error: 'Не найдено' });
+            const input = await body(req, 8192);
+            if (path === '/api/admin/policy') return json(res, 200, await accounts.updatePolicy(user, input));
+            if (path === '/api/admin/users/update') return json(res, 200, await accounts.updateUser(user, input));
+            if (path === '/api/admin/keys/create') return json(res, 200, await accounts.createKey(user, input));
+            if (path === '/api/admin/keys/revoke') return json(res, 200, await accounts.revokeKey(user, input.id));
+            if (path === '/api/admin/users/delete') {
+              const target = accounts.assertDelete(user, input.id);
+              if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(target.id)) throw new Error('Некорректный ID пользователя');
+              deletingUsers.add(target.id);
+              try {
+                const active = await workspaces.get(target.id);
+                if (active?.sync.running) throw Object.assign(new Error('Дождитесь окончания синхронизации пользователя'), { status: 409 });
+                await accounts.deleteUser(user, target.id);
+                const userRoot = resolve(root, 'data/users', target.id), parent = resolve(root, 'data/users');
+                if (!userRoot.startsWith(parent + '/') && !userRoot.startsWith(parent + '\\')) throw new Error('Некорректная папка пользователя');
+                await rm(userRoot, { recursive: true, force: true });
+                await shared.forget(userRoot); await shared.collect(); workspaces.delete(target.id);
+                return json(res, 200, accounts.adminState(user));
+              } finally { deletingUsers.delete(target.id); }
+            }
+            return json(res, 404, { error: 'Не найдено' });
+          }
+          if (requireAuth && !accounts.describe(user).hasFullAccess) return json(res, 403, { error: 'Для аккаунта доступен только демо-режим', code: 'FULL_ACCESS_REQUIRED' });
           return api(req, res, path, await workspaceFor(user));
         };
         if (req.method === 'POST') { const task = mutation.then(handle); mutation = task.catch(() => {}); await task; }
@@ -159,18 +197,19 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       if (path.startsWith('/images/')) {
         const user = requireAuth ? accounts.current(req) : null;
         if (requireAuth && !user) return json(res, 401, { error: 'Войдите в аккаунт' });
+        if (requireAuth && (deletingUsers.has(user.id) || !accounts.describe(user).hasFullAccess)) return json(res, 403, { error: 'Нет доступа к полному режиму', code: 'FULL_ACCESS_REQUIRED' });
         const workspace = await workspaceFor(user), library = workspace.library;
         const id = path.slice(8);
         if (!validId(id) || !library.photos[id] || library.photos[id].stored === false) return json(res, 404, { error: 'Фото не найдено' });
         const data = await readImage(workspace.root, library.photos[id]);
         res.writeHead(200, { 'Content-Type': library.photos[id].mime || 'application/octet-stream', 'Cache-Control': requireAuth ? 'private, no-store' : 'no-cache' }); res.end(data); return;
       }
-      const routes = { '/': ['index.html', 'text/html'], '/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/assets/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/app.js': ['app.js', 'text/javascript'], '/demo.js': ['demo.js', 'text/javascript'], '/auth.js': ['auth.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'], '/library.js': ['library.js', 'text/javascript'], '/render.js': ['render.js', 'text/javascript'], '/previews.js': ['previews.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/history.js': ['history.js', 'text/javascript'], '/coverage.js': ['coverage.js', 'text/javascript'], '/viewer.js': ['viewer.js', 'text/javascript'] };
+      const routes = { '/': ['index.html', 'text/html'], '/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/assets/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/app.js': ['app.js', 'text/javascript'], '/demo.js': ['demo.js', 'text/javascript'], '/auth.js': ['auth.js', 'text/javascript'], '/admin.js': ['admin.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'], '/library.js': ['library.js', 'text/javascript'], '/render.js': ['render.js', 'text/javascript'], '/previews.js': ['previews.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/history.js': ['history.js', 'text/javascript'], '/coverage.js': ['coverage.js', 'text/javascript'], '/viewer.js': ['viewer.js', 'text/javascript'] };
       if (!routes[path]) return json(res, 404, { error: 'Не найдено' });
       const [file, type] = routes[path];
       res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-cache' }); res.end(await readFile(join(here, 'public', file)));
     } catch (e) {
-      if (!res.headersSent) json(res, e.status || (e.code === 'ENOENT' ? 404 : 400), { error: e.code === 'ENOENT' ? 'Файл не найден' : ['EACCES', 'EPERM', 'ENOSPC', 'EIO'].includes(e.code) ? 'Не удалось записать данные в хранилище сервера' : e.message });
+      if (!res.headersSent) json(res, e.status || (e.code === 'ENOENT' ? 404 : 400), { error: e.code === 'ENOENT' ? 'Файл не найден' : ['EACCES', 'EPERM', 'ENOSPC', 'EIO'].includes(e.code) ? 'Не удалось записать данные в хранилище сервера' : e.message, ...(e.publicCode ? { code: e.publicCode } : {}) });
       else res.end();
     }
   });

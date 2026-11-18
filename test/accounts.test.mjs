@@ -47,7 +47,7 @@ test('account routes gate all private data, protect cookies, hash passwords and 
   assert.match(registered.headers.get('set-cookie'), /HttpOnly; SameSite=Strict/);
   assert.match(registered.headers.get('set-cookie'), /Path=\//);
   const user = (await registered.json()).user;
-  assert.deepEqual(Object.keys(user).sort(), ['id', 'login']); assert.equal(user.login, 'alice');
+  assert.deepEqual(Object.keys(user).sort(), ['hasFullAccess', 'id', 'isAdmin', 'isGlobalAdmin', 'login']); assert.equal(user.login, 'alice');
   assert.equal((await stranger.call('/api/auth/register', { login: 'ALICE', password })).status, 409);
   assert.equal((await stranger.call('/api/auth/login', { login: 'alice', password: 'wrong' })).status, 401);
   assert.equal((await stranger.call('/api/auth/register', { login: 'weak', password: 'short' })).status, 400);
@@ -60,6 +60,18 @@ test('account routes gate all private data, protect cookies, hash passwords and 
   assert.equal((await alice.call('/api/state')).status, 401);
   assert.equal((await alice.call('/api/auth/login', { login: 'alice', password })).status, 200);
   assert.equal((await alice.call('/api/auth/session')).status, 200);
+});
+
+test('registration accepts eight-character passwords and rejects seven-character passwords', async t => {
+  const f = await fixture(t), user = f.client();
+  const rejected = await user.call('/api/auth/register', { login: 'short_boundary', password: 'test123' });
+  assert.equal(rejected.status, 400);
+  const accepted = await user.call('/api/auth/register', { login: 'short_boundary', password: 'test1234' });
+  assert.equal(accepted.status, 200);
+  await user.call('/api/auth/logout', {});
+  await f.restart();
+  assert.equal((await user.call('/api/auth/login', { login: 'short_boundary', password: 'test1234' })).status, 200);
+  assert.equal((await user.state()).photos.length, 0);
 });
 
 test('the first account receives the legacy project; other accounts have isolated settings and image ACLs', async t => {

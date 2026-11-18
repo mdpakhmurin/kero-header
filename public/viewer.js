@@ -1,4 +1,27 @@
-import { photoSource } from './library.js';
+import { photoSource, librarySource } from './library.js';
+
+export function createViewerImageCache({ createImage = () => new Image(), maximum = 3 } = {}) {
+  const entries = new Map();
+  return {
+    load(src) {
+      if (entries.has(src)) { const ready = entries.get(src); entries.delete(src); entries.set(src, ready); return ready; }
+      const image = createImage(); image.decoding = 'async';
+      const ready = new Promise((resolve, reject) => {
+        image.onload = async () => {
+          try { await image.decode?.(); } catch { /* A loaded image can still be displayed when decode is unavailable. */ }
+          image.onload = image.onerror = null; resolve(image);
+        };
+        image.onerror = () => { image.onload = image.onerror = null; reject(new Error('Не удалось открыть изображение')); };
+        image.src = src;
+      });
+      entries.set(src, ready);
+      ready.catch(() => { if (entries.get(src) === ready) entries.delete(src); });
+      while (entries.size > maximum) entries.delete(entries.keys().next().value);
+      return ready;
+    },
+    clear() { entries.clear(); },
+  };
+}
 
 export function imageViewport(image, viewport, zoom = 1, pan = { x: 0, y: 0 }) {
   const fit = Math.min(viewport.width / image.width, viewport.height / image.height);
@@ -9,18 +32,35 @@ export function imageViewport(image, viewport, zoom = 1, pan = { x: 0, y: 0 }) {
   return { zoom, fit, min, max, x: Math.max(-maxX, Math.min(maxX, pan.x)), y: Math.max(-maxY, Math.min(maxY, pan.y)), percent: fit * zoom * 100, canPan: maxX > 0 || maxY > 0 };
 }
 
-export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError = () => {} } = {}) {
-  const image = dialog.querySelector('#viewer-image'), message = dialog.querySelector('#viewer-message');
+export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError = () => {}, isFavorite = () => false, onFavorite } = {}) {
+  let image = dialog.querySelector('#viewer-image');
+  const message = dialog.querySelector('#viewer-message'), imageCache = createViewerImageCache();
+  image.hidden = true;
   const strip = dialog.querySelector('#viewer-strip'), position = dialog.querySelector('#viewer-position');
   const previous = dialog.querySelector('#viewer-previous'), next = dialog.querySelector('#viewer-next');
   const source = dialog.querySelector('#viewer-source');
   const add = dialog.querySelector('#viewer-add');
+  const favorite = dialog.querySelector('#viewer-favorite');
   const wrap = dialog.querySelector('.viewer-image-wrap'), zoomOut = dialog.querySelector('#viewer-zoom-out'), zoomIn = dialog.querySelector('#viewer-zoom-in');
   const zoomPercent = dialog.querySelector('#viewer-zoom-percent'), fitButton = dialog.querySelector('#viewer-fit');
   const zoomControls = [zoomOut, zoomIn, zoomPercent, fitButton];
   let photos = [], index = 0, thumbs = [];
   let zoom = 1, pan = { x: 0, y: 0 }, drag = null;
   let adding = false, addedPhoto = null;
+  let savingFavorite = false;
+  let showVersion = 0, changing = false, messageTimer;
+  function renderFavorite() {
+    const photo = photos[index], selected = photo && isFavorite(photo);
+    favorite.hidden = !onFavorite; favorite.disabled = !photo; favorite.setAttribute('aria-busy', String(savingFavorite));
+    favorite.classList.toggle('active', Boolean(selected)); favorite.setAttribute('aria-pressed', String(Boolean(selected)));
+    favorite.title = selected ? 'Удалить из избранного' : 'Добавить в избранное'; favorite.setAttribute('aria-label', favorite.title);
+  }
+  favorite.onclick = async () => {
+    const photo = photos[index]; if (savingFavorite || !photo || !onFavorite) return;
+    savingFavorite = true; renderFavorite();
+    try { await onFavorite(photo); } catch (failure) { onError(failure); }
+    finally { savingFavorite = false; renderFavorite(); }
+  };
   function renderAdd() {
     const photo = photos[index];
     add.hidden = typeof onAdd !== 'function';
@@ -39,7 +79,7 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
   };
 
   function geometry() {
-    if (!image.naturalWidth || !wrap.clientWidth || !wrap.clientHeight || image.hidden) return null;
+    if (changing || !image.naturalWidth || !wrap.clientWidth || !wrap.clientHeight || image.hidden) return null;
     return imageViewport({ width: image.naturalWidth, height: image.naturalHeight }, { width: wrap.clientWidth, height: wrap.clientHeight }, zoom, pan);
   }
   function renderZoom() {
@@ -86,34 +126,43 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
   wrap.onpointerup = wrap.onpointercancel = endDrag;
   window.addEventListener('resize', () => { if (dialog.open) renderZoom(); });
 
-  function show(target) {
+  async function show(target) {
     if (!photos.length) return;
     thumbs[index]?.classList.remove('active');
     thumbs[index]?.removeAttribute('aria-current');
     index = Math.max(0, Math.min(photos.length - 1, target));
     const photo = photos[index];
-    renderAdd();
+    const version = ++showVersion; changing = true; clearTimeout(messageTimer); message.hidden = true;
+    renderAdd(); renderFavorite();
     const caption = dialog.querySelector('#viewer-photo-name');
     const name = photo.source === 'vk' ? 'Фото из VK' : photo.title;
     caption.textContent = name;
     position.textContent = `${index + 1} / ${photos.length}`;
     previous.disabled = index === 0; next.disabled = index === photos.length - 1;
-    image.hidden = true; message.hidden = false; message.textContent = 'Загружаем фото…';
-    zoom = 1; pan = { x: 0, y: 0 }; endDrag(); image.style.transform = '';
-    zoomControls.forEach(control => control.disabled = true); zoomPercent.textContent = '—';
-    image.alt = photo.title;
-    image.onload = () => {
-      image.hidden = false; message.hidden = true;
-      caption.textContent = `${name} · ${image.naturalWidth} × ${image.naturalHeight} px`;
-      fit();
-    };
-    image.onerror = () => { image.hidden = true; message.hidden = false; message.textContent = 'Не удалось открыть изображение. Обновите библиотеку или выполните синхронизацию.'; };
-    image.src = photo.src;
-    const link = photoSource(photo);
+    endDrag(); wrap.setAttribute('aria-busy', 'true');
+    messageTimer = setTimeout(() => {
+      message.classList.toggle('loading', !image.hidden); message.textContent = 'Загружаем фото…'; message.hidden = false;
+    }, 180);
+    const link = librarySource(photo) === 'vk' ? photoSource(photo) : null;
     source.hidden = !link;
     if (link) { source.href = link.href; source.title = link.label; source.setAttribute('aria-label', link.label); }
     thumbs[index].classList.add('active'); thumbs[index].setAttribute('aria-current', 'true');
     thumbs[index].scrollIntoView({ block: 'nearest', inline: 'center' });
+    try {
+      const prepared = await imageCache.load(photo.src);
+      if (version !== showVersion || !dialog.open) return;
+      clearTimeout(messageTimer); message.hidden = true; changing = false; wrap.setAttribute('aria-busy', 'false');
+      prepared.id = 'viewer-image'; prepared.alt = photo.title; prepared.draggable = false; prepared.hidden = false; prepared.style.transform = '';
+      if (prepared !== image) image.replaceWith(prepared); image = prepared;
+      caption.textContent = `${name} · ${image.naturalWidth} × ${image.naturalHeight} px`;
+      fit();
+      for (const neighbor of [photos[index - 1], photos[index + 1]]) if (neighbor) imageCache.load(neighbor.src).catch(() => {});
+    } catch {
+      if (version !== showVersion || !dialog.open) return;
+      clearTimeout(messageTimer); changing = false; wrap.setAttribute('aria-busy', 'false'); image.hidden = true;
+      message.classList.remove('loading'); message.hidden = false; message.textContent = 'Не удалось открыть изображение. Обновите библиотеку или выполните синхронизацию.';
+      zoomControls.forEach(control => control.disabled = true);
+    }
   }
 
   previous.onclick = () => show(index - 1);
@@ -136,13 +185,15 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
     if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
   });
   dialog.addEventListener('close', () => {
-    endDrag();
+    endDrag(); showVersion++; changing = false; clearTimeout(messageTimer); imageCache.clear();
     image.onload = image.onerror = null; image.removeAttribute('src');
+    image.hidden = true; message.hidden = true;
     strip.replaceChildren(); photos = []; thumbs = [];
     addedPhoto = null;
   });
 
   return {
+    refreshFavorites: renderFavorite,
     open(photo, collection) {
       photos = collection.filter(candidate => candidate.available && candidate.src);
       const start = photos.findIndex(candidate => candidate.id === photo.id);

@@ -2,6 +2,26 @@ export function librarySource(photo) {
   return photo.source || (photo.id.startsWith('local_') ? 'local' : 'vk');
 }
 
+export function createFavoritesView() {
+  let scope = null, retained = new Set();
+  const reset = () => { scope = null; retained.clear(); };
+  return {
+    ids(favorites, nextScope) {
+      if (nextScope == null) { reset(); return new Set(favorites); }
+      if (scope !== nextScope) { retained.clear(); scope = nextScope; }
+      for (const id of favorites) retained.add(id);
+      return new Set(retained);
+    },
+    reset,
+  };
+}
+
+export function canvasLayerOrder(frames, favorites, enabled) {
+  if (!enabled) return frames;
+  const ids = new Set(favorites);
+  return [...frames.filter(frame => !ids.has(frame.id)), ...frames.filter(frame => ids.has(frame.id))];
+}
+
 export function photoTime(photo) {
   const time = Number(librarySource(photo) === 'local' ? photo.addedAt / 1000 : photo.date);
   return Number.isFinite(time) && time > 0 ? time : null;

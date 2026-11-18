@@ -8,10 +8,10 @@ import { photoSource } from '../public/library.js';
 function memoryStore() {
   const meta = new Map(), photos = new Map();
   return {
-    async read() { return structuredClone({ settings: meta.get('settings'), exclusions: meta.get('exclusions'), photos: [...photos.values()] }); },
+    async read() { return structuredClone({ settings: meta.get('settings'), exclusions: meta.get('exclusions'), favorites: meta.get('favorites'), photos: [...photos.values()] }); },
     async saveMeta(key, value) { meta.set(key, structuredClone(value)); },
     async putPhoto(photo) { photos.set(photo.id, structuredClone({ ...photo, addedAt: photos.get(photo.id)?.addedAt || photo.addedAt })); },
-    async clearPhotos() { const ids = [...photos.keys()]; photos.clear(); meta.set('exclusions', []); return ids; },
+    async clearPhotos() { const ids = [...photos.keys()]; photos.clear(); meta.set('exclusions', []); meta.set('favorites', []); return ids; },
   };
 }
 function fixture(store = memoryStore()) {
@@ -80,4 +80,16 @@ test('normal mode keeps using the project API and original image URLs', async ()
   await client.request('settings', { width: 1920 });
   assert.equal(await (await client.photoBlob({ src: '/images/photo' })).text(), 'original');
   assert.equal(calls[0].url, '/api/state'); assert.equal(calls[1].options.method, 'POST'); assert.equal(calls[2].url, '/images/photo');
+});
+
+test('demo favorites and their canvas order persist locally without network requests', async () => {
+  const f = fixture(), { id } = await f.client.request('import', { file: file(), dimensions: { width: 1, height: 1 } });
+  await f.client.request('state'); await f.client.request('favorites', [id]);
+  await f.client.request('settings', { ...defaults, favoritesFirst: true });
+  const reload = fixture(f.store), state = await reload.client.request('state');
+  assert.deepEqual(state.favorites, [id]); assert.equal(state.settings.favoritesFirst, true);
+  await reload.client.request('favorites', []); assert.deepEqual((await reload.client.request('state')).favorites, []);
+  await reload.client.request('favorites', [id]); await reload.client.request('files/delete', { source: 'local' });
+  assert.deepEqual((await reload.client.request('state')).favorites, []);
+  assert.equal(f.network(), 0); assert.equal(reload.network(), 0);
 });

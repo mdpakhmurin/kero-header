@@ -13,13 +13,16 @@ export function createClient({ demoMode, demo, fetcher = globalThis.fetch }) {
       if (demoMode) return demo.request(path, data);
       const response = await fetcher(`/api/${path}`, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
       const result = await response.json();
-      if (!response.ok) throw Object.assign(new Error(result.error || 'Ошибка сервера'), { status: response.status });
+      if (!response.ok) throw Object.assign(new Error(result.error || 'Ошибка сервера'), { status: response.status, code: result.code });
       return result;
     },
     async photoBlob(photo) {
       if (demoMode) return demo.photoBlob(photo.id);
       const response = await fetcher(photo.src);
-      if (!response.ok) throw new Error('Не удалось прочитать фотографию. Обновите библиотеку.');
+      if (!response.ok) {
+        const details = await response.json().catch(() => ({}));
+        throw Object.assign(new Error(details.error || 'Не удалось прочитать фотографию. Обновите библиотеку.'), { status: response.status, code: details.code });
+      }
       return response.blob();
     },
   };
@@ -54,7 +57,7 @@ export function createBrowserStore(factory = globalThis.indexedDB) {
     read() {
       return transaction(['meta', 'photos'], 'readonly', (store, result) => {
         const data = {}; result(data);
-        for (const key of ['settings', 'exclusions']) store('meta').get(key).onsuccess = event => { data[key] = event.target.result; };
+        for (const key of ['settings', 'exclusions', 'favorites']) store('meta').get(key).onsuccess = event => { data[key] = event.target.result; };
         store('photos').getAll().onsuccess = event => { data.photos = event.target.result; };
       });
     },
@@ -68,7 +71,7 @@ export function createBrowserStore(factory = globalThis.indexedDB) {
     clearPhotos() {
       return transaction(['meta', 'photos'], 'readwrite', (store, result) => {
         store('photos').getAllKeys().onsuccess = event => result(event.target.result);
-        store('photos').clear(); store('meta').put([], 'exclusions');
+        store('photos').clear(); store('meta').put([], 'exclusions'); store('meta').put([], 'favorites');
       });
     },
   };
@@ -89,7 +92,7 @@ export function createDemoBackend({ store = createBrowserStore(), urls = globalT
     for (const [id, url] of objectUrls) if (!ids.has(id)) { urls.revokeObjectURL(url); objectUrls.delete(id); }
     originals.clear();
     return {
-      settings: validateSettings(data.settings || defaults), exclusions: data.exclusions || [], lastSync: null, hasToken: false,
+      settings: validateSettings(data.settings || defaults), exclusions: data.exclusions || [], favorites: data.favorites || [], lastSync: null, hasToken: false,
       sync: { running: false, message: '', warnings: [] },
       photos: photos.map(({ blob, ...photo }) => {
         originals.set(photo.id, blob);
@@ -112,6 +115,11 @@ export function createDemoBackend({ store = createBrowserStore(), urls = globalT
     async request(path, data) {
       if (path === 'state' && data === undefined) return state();
       if (path === 'settings') { const settings = validateSettings(data); await store.saveMeta('settings', settings); return settings; }
+      if (path === 'favorites') {
+        const owned = new Set((await store.read()).photos.map(photo => photo.id));
+        if (!Array.isArray(data) || data.length > 100000 || !data.every(id => owned.has(id))) throw new Error('Выберите фотографии своей библиотеки');
+        const favorites = [...new Set(data)].sort(); await store.saveMeta('favorites', favorites); return favorites;
+      }
       if (path === 'exclusions') {
         if (!Array.isArray(data) || data.length > 100000 || !data.every(id => /^local_[a-f0-9]{64}$/.test(id))) throw new Error('Некорректный список исключений');
         const exclusions = [...new Set(data)].sort(); await store.saveMeta('exclusions', exclusions); return exclusions;
