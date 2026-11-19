@@ -18,6 +18,15 @@ async function launch() {
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error('PORT должен быть целым числом от 0 до 65535.');
   }
+  if (port) {
+    const url = `http://127.0.0.1:${port}`;
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(1500), redirect: 'error' });
+      const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+      if (response.ok && await response.text() === html) { console.log(`Kero Header уже запущен: ${url}`); openBrowser(url); return; }
+      throw new Error(`Порт ${port} занят другой программой. Укажите другой PORT в .env.`);
+    } catch (error) { if (error.message.startsWith('Порт ')) throw error; }
+  }
   const app = await createApp();
   try {
     await new Promise((resolve, reject) => {

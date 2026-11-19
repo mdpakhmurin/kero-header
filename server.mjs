@@ -2,30 +2,44 @@ import http from 'node:http';
 import { readFile, stat, readdir, unlink, mkdir, rm } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { writeJSON, validateSettings, validId, digest, saveImage, imagePath, readImage } from './lib/storage.mjs';
+import { writeJSON, validateSettings, validId, digest, saveImage, imagePath, readImage, releaseWorkspace } from './lib/storage.mjs';
 import { syncLibrary, createVK } from './lib/vk.mjs';
 import { openFolder } from './lib/folder.mjs';
 import { coverCommunity, coverImage, installCover } from './lib/cover.mjs';
 import { createAccounts } from './lib/accounts.mjs';
 import { createMediaStore } from './lib/media.mjs';
 import { loadWorkspace } from './lib/workspaces.mjs';
+import { openDatabase } from './lib/database.mjs';
+import { redactToken } from './lib/token-vault.mjs';
+import { acquireAppLock } from './lib/app-lock.mjs';
+import { removeMigratedVKToken } from './lib/legacy-env.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 try { process.loadEnvFile(join(here, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 
-export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder, coverInstaller = installCover, requireAuth = true, imageDownloader, globalAdminIds = (process.env.GLOBAL_ADMIN_IDS || '').split(',') } = {}) {
+export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder, coverInstaller = installCover, requireAuth = true, imageDownloader, globalAdminIds = (process.env.GLOBAL_ADMIN_IDS || '').split(','), encryptionKey, legacyToken } = {}) {
   root = resolve(root);
-  const accounts = requireAuth ? await createAccounts(root, { globalAdminIds }) : null;
+  const releaseLock = requireAuth ? acquireAppLock(root) : () => {};
+  let accounts, shared, database;
+  try {
+    database = requireAuth ? await openDatabase(root, { encryptionKey, legacyToken: legacyToken ?? (root === here ? process.env.VK_TOKEN || '' : '') }) : null;
+    if (database && root === here) await removeMigratedVKToken(root, database);
+    accounts = requireAuth ? await createAccounts(root, { globalAdminIds, database }) : null; shared = requireAuth ? await createMediaStore(root, database) : null;
+  } catch (error) { database?.close(); releaseLock(); throw error; }
   const deletingUsers = new Set();
-  const shared = requireAuth ? await createMediaStore(root) : null, workspaces = new Map();
+  const workspaces = new Map(), pendingSync = new Set();
   const legacy = requireAuth ? null : await loadWorkspace(root, { token: process.env.VK_TOKEN || '' });
   function workspaceFor(user) {
     if (!requireAuth) return legacy;
     if (deletingUsers.has(user.id)) throw Object.assign(new Error('Аккаунт удаляется'), { status: 401 });
-    if (!workspaces.has(user.id)) workspaces.set(user.id, loadWorkspace(join(root, 'data/users', user.id), { shared, legacyRoot: root, inheritLegacy: user.legacyOwner, token: user.legacyOwner ? process.env.VK_TOKEN || '' : '' }).catch(error => { workspaces.delete(user.id); throw error; }));
+    if (!workspaces.has(user.id)) workspaces.set(user.id, loadWorkspace(join(root, 'data/users', user.id), { shared, database, userId: user.id, inheritLegacy: user.legacyOwner }).catch(error => { workspaces.delete(user.id); throw error; }));
     return workspaces.get(user.id);
   }
   let mutation = Promise.resolve();
+  const userVK = token => {
+    let call; try { call = vkFactory(token); } catch (error) { throw new Error(redactToken(error.message, token)); }
+    return async (...args) => { try { return await call(...args); } catch (error) { throw new Error(redactToken(error.message, token)); } };
+  };
   const json = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)); };
   async function body(req, maximum = 42_000_000) {
     if (!req.headers['content-type']?.startsWith('application/json')) throw new Error('Нужен Content-Type application/json');
@@ -52,7 +66,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       if (input.confirmed !== true) throw new Error('Подтвердите замену обложки сообщества');
       if (!token) throw new Error('Добавьте токен VK в настройках подключения. Ему нужен доступ к изменению обложки сообщества.');
       const community = coverCommunity(input.community), image = coverImage(input.data);
-      return json(res, 200, await coverInstaller({ community, image, call: vkFactory(token) }));
+      return json(res, 200, await coverInstaller({ community, image, call: userVK(token) }));
     }
     if (path === '/api/settings') { const next = validateSettings(input); await writeJSON(join(root, 'config/settings.json'), next); settings = next; return json(res, 200, settings); }
     if (path === '/api/favorites') {
@@ -75,9 +89,14 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
         if (input.source === 'local') exclusions.filter(id => id.startsWith('local_')).forEach(id => ids.add(id));
         for (const id of ids) { if (input.source === 'local') delete library.photos[id]; else library.photos[id].stored = false; }
         if (input.source === 'local') exclusions = exclusions.filter(id => !ids.has(id));
-        if (input.source === 'local') { favorites = favorites.filter(id => !ids.has(id)); await writeJSON(join(root, 'config/favorites.json'), favorites); }
-        await writeJSON(join(root, 'cache/library.json'), library);
-        if (input.source === 'local') await writeJSON(join(root, 'config/exclusions.json'), exclusions);
+        if (input.source === 'local') favorites = favorites.filter(id => !ids.has(id));
+        if (workspace.database) {
+          workspace.database.saveWorkspace(workspace.userId, { library, exclusions, favorites });
+          await workspace.shared.commit(root, library);
+        } else {
+          await writeJSON(join(root, 'cache/library.json'), library);
+          if (input.source === 'local') { await writeJSON(join(root, 'config/exclusions.json'), exclusions); await writeJSON(join(root, 'config/favorites.json'), favorites); }
+        }
         await workspace.shared.collect();
         return json(res, 200, { removed: ids.size, ids: [...ids] });
       }
@@ -113,7 +132,10 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
     if (path === '/api/token') {
       if (typeof input.token !== 'string' || input.token.length > 4096) throw new Error('Некорректный токен');
       const candidate = input.token.trim();
-      if (candidate) await vkFactory(candidate)('utils.resolveScreenName', { screen_name: settings.community });
+      if (/[\u0000-\u0020\u007f]/.test(candidate)) throw new Error('Токен VK не должен содержать пробелы или переносы строк');
+      if (sync.running) throw Object.assign(new Error('Дождитесь окончания синхронизации перед изменением токена'), { status: 409 });
+      if (candidate) await userVK(candidate)('utils.resolveScreenName', { screen_name: settings.community });
+      workspace.database?.setToken(workspace.userId, candidate);
       token = candidate;
       if (!sync.running) sync = { running: false, message: '', warnings: [] };
       return json(res, 200, { hasToken: Boolean(token), verified: Boolean(token) });
@@ -122,8 +144,9 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       if (sync.running) return json(res, 409, { error: 'Синхронизация уже идёт' });
       if (!token) return json(res, 400, { error: 'Добавьте токен VK в настройках подключения' });
       sync = { running: true, done: 0, total: 0, downloaded: 0, cached: 0, skipped: 0, failed: 0, message: 'Подключаемся к VK…', warnings: [] };
-      syncLibrary({ root, settings: { ...settings }, token, library, exclusions: [...exclusions], status: sync, call: vkFactory(token), download: imageDownloader, reuseImage: workspace.shared ? photo => workspace.shared.reuse(root, photo) : undefined })
-        .catch(e => { sync.error = e.message; sync.message = e.message; }).finally(() => { sync.running = false; });
+      const task = syncLibrary({ root, settings: { ...settings }, token, library, exclusions: [...exclusions], status: sync, call: userVK(token), download: imageDownloader, reuseImage: workspace.shared ? photo => workspace.shared.reuse(root, photo) : undefined })
+        .catch(e => { sync.error = redactToken(e.message, token); sync.message = sync.error; }).finally(() => { sync.running = false; pendingSync.delete(task); });
+      pendingSync.add(task);
       return json(res, 202, sync);
     }
     if (path === '/api/import') {
@@ -169,6 +192,12 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
             if (path === '/api/admin/users/update') return json(res, 200, await accounts.updateUser(user, input));
             if (path === '/api/admin/keys/create') return json(res, 200, await accounts.createKey(user, input));
             if (path === '/api/admin/keys/revoke') return json(res, 200, await accounts.revokeKey(user, input.id));
+            if (path === '/api/admin/token-key/rotate') {
+              if (!accounts.describe(user).isGlobalAdmin) return json(res, 403, { error: 'Сменить ключ шифрования может только глобальный администратор' });
+              if (input.confirmed !== true) throw new Error('Подтвердите создание нового ключа шифрования');
+              const rotation = await database.rotateTokenKey();
+              return json(res, 200, { ...accounts.adminState(user), tokenKeyRotation: rotation });
+            }
             if (path === '/api/admin/users/delete') {
               const target = accounts.assertDelete(user, input.id);
               if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(target.id)) throw new Error('Некорректный ID пользователя');
@@ -209,10 +238,14 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       const [file, type] = routes[path];
       res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-cache' }); res.end(await readFile(join(here, 'public', file)));
     } catch (e) {
-      if (!res.headersSent) json(res, e.status || (e.code === 'ENOENT' ? 404 : 400), { error: e.code === 'ENOENT' ? 'Файл не найден' : ['EACCES', 'EPERM', 'ENOSPC', 'EIO'].includes(e.code) ? 'Не удалось записать данные в хранилище сервера' : e.message, ...(e.publicCode ? { code: e.publicCode } : {}) });
+      if (!res.headersSent) json(res, e.status || (e.code === 'ENOENT' ? 404 : 400), { error: e.code === 'ENOENT' ? 'Файл не найден' : ['EACCES', 'EPERM', 'ENOSPC', 'EIO', 'ERR_SQLITE_ERROR'].includes(e.code) ? 'Не удалось записать данные в хранилище сервера' : e.message, ...(e.publicCode ? { code: e.publicCode } : {}) });
       else res.end();
     }
   });
+  const cleanup = () => { for (const id of workspaces.keys()) releaseWorkspace(join(root, 'data/users', id)); database?.close(); releaseLock(); };
+  server.once('close', () => { if (pendingSync.size) Promise.allSettled([...pendingSync]).then(cleanup); else cleanup(); });
+  server.once('error', () => { if (!server.listening) cleanup(); });
+  server.database = database;
   return server;
 }
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

@@ -16,6 +16,7 @@ export function setupAdmin({ request, confirm, currentUser }) {
     try {
       const { code, ...snapshot } = await request(path, input); data = snapshot;
       if (code) { $('#created-key').value = code; $('#created-key-box').hidden = false; $('#copy-created-key').textContent = 'Скопировать'; }
+      if (data.tokenKeyRotation) { $('#token-key-status').textContent = 'Новый ключ сохранён. Все токены VK перешифрованы.'; $('#token-key-status').hidden = false; }
     } catch (failure) { error.textContent = failure.message; error.hidden = false; }
     finally { setBusy(false); if (data) render(); }
   }
@@ -67,6 +68,7 @@ export function setupAdmin({ request, confirm, currentUser }) {
     row.status.textContent = types[key.type] + ' · ' + status + ' · Регистраций: ' + key.uses; row.revoke.disabled = !key.active;
   }
   function render() {
+    $('#admin-encryption').hidden = !currentUser().isGlobalAdmin;
     $('#admin-all-access').checked = data.policies.grantAllRegistered; $('#admin-open-registration').checked = data.policies.openRegistration;
     reconcile($('#admin-users'), users, data.users, createUserRow, updateUserRow);
     reconcile($('#admin-keys'), keys, [...data.keys].reverse(), createKeyRow, updateKeyRow);
@@ -74,6 +76,11 @@ export function setupAdmin({ request, confirm, currentUser }) {
   }
   $('#admin-all-access').onchange = event => { if (busy) render(); else mutate('admin/policy', { grantAllRegistered: event.target.checked }); };
   $('#admin-open-registration').onchange = event => { if (busy) render(); else mutate('admin/policy', { openRegistration: event.target.checked }); };
+  $('#rotate-token-key').onclick = async () => {
+    if (busy || !currentUser().isGlobalAdmin) return;
+    if (!await confirm({ title: 'Создать новый ключ шифрования?', description: 'Все сохранённые токены VK будут перешифрованы новым ключом. Подключения пользователей сохранятся.', label: 'Создать ключ', danger: false })) return;
+    await mutate('admin/token-key/rotate', { confirmed: true });
+  };
   const menu = $('#key-type-menu'), trigger = $('#key-type-trigger'), choices = [...menu.querySelectorAll('[data-key-type]')];
   function positionMenu() {
     const rect = trigger.getBoundingClientRect(); menu.style.width = rect.width + 'px';
@@ -109,7 +116,7 @@ export function setupAdmin({ request, confirm, currentUser }) {
   };
   $('#admin-close').onclick = () => { if (!busy) dialog.close(); };
   dialog.addEventListener('cancel', event => { if (busy) event.preventDefault(); });
-  dialog.addEventListener('close', () => { menu.hidePopover(); $('#created-key').value = ''; $('#created-key-box').hidden = true; $('#copy-created-key').textContent = 'Скопировать'; });
+  dialog.addEventListener('close', () => { menu.hidePopover(); $('#created-key').value = ''; $('#created-key-box').hidden = true; $('#copy-created-key').textContent = 'Скопировать'; $('#token-key-status').hidden = true; });
   return {
     async open() {
       if (dialog.open) return; error.hidden = true; dialog.showModal(); setBusy(true);

@@ -7,13 +7,15 @@ import { createApp } from '../server.mjs';
 import { defaults, saveImage, writeJSON, digest, imagePath } from '../lib/storage.mjs';
 import { createMediaStore } from '../lib/media.mjs';
 import { createAccounts } from '../lib/accounts.mjs';
+import { DatabaseSync } from 'node:sqlite';
 
 const password = 'A private test password 123!';
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64');
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'kero-accounts-test-'));
+  const { prepare, ...appOptions } = options; if (prepare) await prepare(root);
   let server, base;
-  async function start() { server = await createApp(root, options); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${server.address().port}`; }
+  async function start() { server = await createApp(root, appOptions); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${server.address().port}`; }
   async function stop() { if (server?.listening) await new Promise(resolve => server.close(resolve)); }
   await start(); t.after(async () => { await stop(); await rm(root, { recursive: true, force: true }); });
   const client = () => {
@@ -51,9 +53,11 @@ test('account routes gate all private data, protect cookies, hash passwords and 
   assert.equal((await stranger.call('/api/auth/register', { login: 'ALICE', password })).status, 409);
   assert.equal((await stranger.call('/api/auth/login', { login: 'alice', password: 'wrong' })).status, 401);
   assert.equal((await stranger.call('/api/auth/register', { login: 'weak', password: 'short' })).status, 400);
-  const stored = await readFile(join(f.root, 'data/accounts.json'), 'utf8');
+  const connection = new DatabaseSync(join(f.root, 'data/kero.sqlite'), { readOnly: true });
+  const users = connection.prepare('SELECT salt,password_hash FROM users').all(), sessions = connection.prepare('SELECT * FROM sessions').all(); connection.close();
+  const stored = JSON.stringify({ users, sessions });
   assert.equal(stored.includes(password), false); assert.equal(stored.includes(alice.cookie().split('=')[1]), false);
-  assert.equal(JSON.parse(stored).users[0].salt.length, 32);
+  assert.equal(users[0].salt.length, 32);
   assert.equal((await stranger.call('/data/accounts.json')).status, 404);
   await f.restart(); assert.equal((await alice.state()).photos.length, 0);
   assert.equal((await alice.call('/api/auth/logout', {})).status, 200);
@@ -75,14 +79,16 @@ test('registration accepts eight-character passwords and rejects seven-character
 });
 
 test('the first account receives the legacy project; other accounts have isolated settings and image ACLs', async t => {
-  const f = await fixture(t), id = `local_${digest(png)}`;
-  const metadata = await saveImage(f.root, id, png);
-  await writeJSON(join(f.root, 'config/settings.json'), { ...defaults, rotation: 42 });
-  await writeJSON(join(f.root, 'cache/library.json'), { photos: { [id]: { id, source: 'local', title: 'Legacy photo', ...metadata } } });
-  await writeJSON(join(f.root, 'config/exclusions.json'), [id]);
+  const id = `local_${digest(png)}`; let metadata;
+  const f = await fixture(t, { prepare: async root => {
+    metadata = await saveImage(root, id, png);
+    await writeJSON(join(root, 'config/settings.json'), { ...defaults, rotation: 42 });
+    await writeJSON(join(root, 'cache/library.json'), { photos: { [id]: { id, source: 'local', title: 'Legacy photo', ...metadata } } });
+    await writeJSON(join(root, 'config/exclusions.json'), [id]);
+  } });
   const alice = f.client(), bob = f.client(); const owner = await alice.register('owner');
   const own = await alice.state(); assert.equal(own.settings.rotation, 42); assert.deepEqual(own.exclusions, [id]); assert.equal(own.photos[0].available, true);
-  await assert.rejects(stat(imagePath(f.root, { id, ...metadata })), { code: 'ENOENT' });
+  assert.deepEqual(await readFile(imagePath(f.root, { id, ...metadata })), png);
   await bob.register('second'); const other = await bob.state();
   assert.equal(other.photos.length, 0); assert.equal(other.settings.rotation, defaults.rotation); assert.deepEqual(other.exclusions, []); assert.equal(other.hasToken, false);
   assert.equal((await bob.call(`/images/${id}?user=${owner.id}`)).status, 404);
@@ -148,9 +154,10 @@ test('in-flight attachments are retained during garbage collection', async t => 
 });
 
 test('sessions have an absolute expiration and never contain raw passwords', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'kero-session-test-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await mkdtemp(join(tmpdir(), 'kero-session-test-'));
   let clock = 1000, cookie;
   const service = await createAccounts(root, { now: () => clock });
+  t.after(async () => { service.close(); await rm(root, { recursive: true, force: true }); });
   const req = { headers: {}, socket: { remoteAddress: '127.0.0.1', encrypted: true } }, res = { setHeader: (_, value) => { cookie = value; } };
   await service.authenticate(req, res, { login: 'expiry', password }, true);
   assert.match(cookie, /; Secure$/); req.headers.cookie = cookie.split(';')[0]; assert.equal(service.current(req).login, 'expiry');
@@ -158,8 +165,9 @@ test('sessions have an absolute expiration and never contain raw passwords', asy
 });
 
 test('authentication attempts are rate-limited without storing credentials in the limit counters', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'kero-rate-test-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await mkdtemp(join(tmpdir(), 'kero-rate-test-'));
   const service = await createAccounts(root), req = { headers: {}, socket: { remoteAddress: '127.0.0.1' } }, res = { setHeader() {} };
+  t.after(async () => { service.close(); await rm(root, { recursive: true, force: true }); });
   await service.authenticate(req, res, { login: 'limited', password }, true);
   for (let i = 0; i < 14; i++) await assert.rejects(service.authenticate(req, res, { login: 'limited', password }, true), error => error.status === 409);
   await assert.rejects(service.authenticate(req, res, { login: 'limited', password }, false), error => error.status === 429);

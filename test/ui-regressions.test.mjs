@@ -86,7 +86,7 @@ test('viewer retries failed images and bounds its decoded image cache', async t 
 
 test('admin policy changes retain row elements, control state and a clearly selected key type', async t => {
   const root = new Element(), dialog = add(root, 'admin-dialog', 'dialog');
-  for (const id of ['admin-error', 'admin-all-access', 'admin-open-registration', 'admin-users', 'admin-keys', 'admin-keys-empty', 'key-type-menu', 'key-type-trigger', 'key-type-value', 'key-hours-field', 'key-hours', 'admin-key-form', 'key-label', 'created-key', 'created-key-box', 'copy-created-key', 'admin-close']) add(dialog, id);
+  for (const id of ['admin-error', 'admin-all-access', 'admin-open-registration', 'admin-users', 'admin-keys', 'admin-keys-empty', 'key-type-menu', 'key-type-trigger', 'key-type-value', 'key-hours-field', 'key-hours', 'admin-key-form', 'key-label', 'created-key', 'created-key-box', 'copy-created-key', 'admin-close', 'admin-encryption', 'rotate-token-key', 'token-key-status']) add(dialog, id);
   const menu = dialog.querySelector('#key-type-menu');
   for (const type of ['single', 'temporary', 'permanent']) { const button = new Element('button'); button.dataset.keyType = type; menu.append(button); }
   environment(t, root);
@@ -110,6 +110,11 @@ test('admin policy changes retain row elements, control state and a clearly sele
   dialog.querySelector('#key-hours').value = '12'; dialog.querySelector('#admin-key-form').onsubmit({ preventDefault() {}, currentTarget: dialog.querySelector('#admin-key-form') }); await flush();
   assert.deepEqual(calls.at(-1).input, { type: 'temporary', hours: 12, label: '' });
   assert.equal(rows.children[1], row);
+  assert.equal(dialog.querySelector('#admin-encryption').hidden, false);
+  await dialog.querySelector('#rotate-token-key').onclick();
+  assert.equal(calls.at(-1).path, 'admin/token-key/rotate'); assert.deepEqual(calls.at(-1).input, { confirmed: true });
+  const count = calls.length; data.users[0].isGlobalAdmin = false;
+  await dialog.querySelector('#rotate-token-key').onclick(); assert.equal(calls.length, count);
 });
 
 test('the RGB 227 canvas default replaces previous defaults in saved and demo settings', () => {

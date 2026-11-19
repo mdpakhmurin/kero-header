@@ -1066,6 +1066,7 @@ function openConnection() {
   $('#connection-error').hidden = true;
 }
 $('#sync-settings').onclick = openConnection; $('#close-dialog').onclick = () => $('#connect-dialog').close();
+$('#connect-dialog').addEventListener('close', () => { $('#connect-form').elements.token.value = ''; });
 $('#connect-form').onsubmit = action(async event => {
   event.preventDefault(); const f = event.target;
   const button = f.querySelector('button[type="submit"]'), error = $('#connection-error');
@@ -1080,11 +1081,11 @@ $('#connect-form').onsubmit = action(async event => {
     if (candidate) { await api('token', { token: candidate }); state.hasToken = true; f.elements.token.value = ''; $('#sync-status').hidden = true; }
     $('#connect-dialog').close(); renderLibrary(); draw(); updateCoverSubmit();
     if (coverDialog.open && state.hasToken) $('#cover-error').hidden = true;
-    toast(candidate ? 'VK подтвердил доступ. Токен сохранён в памяти сервера.' : 'Подключение VK сохранено.');
+    toast(candidate ? 'VK подтвердил доступ. Личный токен сохранён.' : 'Подключение VK сохранено.');
   } catch (e) { error.textContent = e.message; error.hidden = false; }
   finally { button.disabled = false; button.textContent = 'Сохранить подключение'; }
 });
-$('#forget-token').onclick = action(async () => { await api('token', { token: '' }); state.hasToken = false; updateCoverSubmit(); $('#connect-form').elements.token.value = ''; $('#connect-form').elements.token.placeholder = 'Вставьте токен VK'; toast('Токен удалён из памяти сервера. Если он задан в .env, удалите его и там.'); });
+$('#forget-token').onclick = action(async () => { await api('token', { token: '' }); state.hasToken = false; updateCoverSubmit(); $('#connect-form').elements.token.value = ''; $('#connect-form').elements.token.placeholder = 'Вставьте токен VK'; toast('Личный токен VK удалён.'); });
 $('#sync').onclick = action(async () => { if (!state.hasToken) { openConnection(); return; } await saveQueue; await api('sync', {}); pollSync(); });
 async function pollSync() {
   if (demoMode) return;

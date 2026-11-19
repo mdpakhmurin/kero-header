@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Локальная мастерская обложек Kero Comics",
-  "scripts": { "start": "node server.mjs", "dev": "node --watch server.mjs", "test": "node --test" },
-  "engines": { "node": ">=22" }
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "test": "node --test",
+    "migrate": "node scripts/migrate.mjs"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
 }

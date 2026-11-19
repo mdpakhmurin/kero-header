@@ -79,7 +79,7 @@ test('closed registration uses hashed single-use keys atomically and never consu
   const missing = await f.client().call('auth/register', { login: 'missing_key', password }); assert.equal(missing.status, 400); assert.equal((await missing.json()).code, 'REGISTRATION_KEY_REQUIRED');
   const created = await (await f.global.call('admin/keys/create', { type: 'single', label: 'For one user' })).json();
   assert.match(created.code, /^kr_/);
-  assert.equal((await readFile(join(f.root, 'data/accounts.json'), 'utf8')).includes(created.code), false);
+  assert.equal((await readFile(join(f.root, 'data/kero.sqlite'))).includes(Buffer.from(created.code)), false);
   const invalid = await f.client().call('auth/register', { login: 'invalid_pass', password: 'short', registrationKey: created.code }); assert.equal(invalid.status, 400);
   const responses = await Promise.all([f.client().call('auth/register', { login: 'invite_one', password, registrationKey: created.code }), f.client().call('auth/register', { login: 'invite_two', password, registrationKey: created.code })]);
   assert.deepEqual(responses.map(res => res.status).sort(), [200, 400]);
@@ -90,12 +90,13 @@ test('closed registration uses hashed single-use keys atomically and never consu
 });
 
 test('temporary keys expire, permanent keys allow multiple registrations, and revoked keys cannot be used', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'kero-key-test-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await mkdtemp(join(tmpdir(), 'kero-key-test-'));
   let clock = 1000, token; const ids = [];
   const service = await createAccounts(root, { now: () => clock, globalAdminIds: ids });
   const req = { headers: {}, socket: { remoteAddress: '127.0.0.1' } }, res = { setHeader: (_, value) => { token = value.split(';')[0]; } };
   const owner = await service.authenticate(req, res, { login: 'key_owner', password }, true);
   const configured = await createAccounts(root, { now: () => clock, globalAdminIds: [owner.id] }); req.headers.cookie = token;
+  t.after(async () => { configured.close(); service.close(); await rm(root, { recursive: true, force: true }); });
   const actor = configured.current(req); await configured.updatePolicy(actor, { openRegistration: false });
   const temporary = await configured.createKey(actor, { type: 'temporary', hours: 1 });
   clock += 2 * 3600000;
