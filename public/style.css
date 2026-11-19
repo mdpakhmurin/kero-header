@@ -19,6 +19,7 @@ button:focus, a:focus, input:focus, select:focus, textarea:focus, form:focus { o
 a { color: inherit; }
 svg { display: block; }
 [hidden] { display: none !important; }
+html[data-demo-only=true] :is([data-mode-choice], #auth-screen, #limited-screen, #account-controls, #open-admin, #admin-dialog) { display: none !important; }
 h1, h2, p { margin: 0; }
 .topbar { height: 66px; padding: 0 28px; display: flex; align-items: center; gap: 28px; background: #fff; border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
 .topbar { width: 100%; }

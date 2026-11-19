@@ -27,6 +27,8 @@ test('demo mode is selected before startup requests; explicit URL mode overrides
   assert.equal(initialMode('?mode=local', 'demo'), 'local');
   assert.equal(initialMode('', 'demo'), 'demo');
   assert.equal(initialMode('?mode=unknown', null), 'local');
+  assert.equal(initialMode('?mode=local', 'local', true), 'demo');
+  assert.equal(initialMode('', 'local', true), 'demo');
 });
 
 test('demo imports, persists, reads and exports originals entirely within browser storage', async () => {

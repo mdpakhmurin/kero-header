@@ -13,19 +13,21 @@ import { openDatabase } from './lib/database.mjs';
 import { redactToken } from './lib/token-vault.mjs';
 import { acquireAppLock } from './lib/app-lock.mjs';
 import { removeMigratedVKToken, updateNumericAdminIds } from './lib/legacy-env.mjs';
+import { parsePublicOrigin, allowedRequest } from './lib/web-origin.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 try { process.loadEnvFile(join(here, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 
-export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder, coverInstaller = installCover, requireAuth = true, imageDownloader, globalAdminIds, encryptionKey, legacyToken } = {}) {
+export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder, coverInstaller = installCover, requireAuth = true, imageDownloader, globalAdminIds, encryptionKey, legacyToken, publicOrigin } = {}) {
   root = resolve(root);
+  const origin = parsePublicOrigin(publicOrigin ?? (root === here ? process.env.PUBLIC_ORIGIN : ''));
   globalAdminIds ??= root === here ? (process.env.GLOBAL_ADMIN_IDS || '').split(',') : [];
   const releaseLock = requireAuth ? acquireAppLock(root) : () => {};
   let accounts, shared, database;
   try {
     database = requireAuth ? await openDatabase(root, { encryptionKey, legacyToken: legacyToken ?? (root === here ? process.env.VK_TOKEN || '' : '') }) : null;
     if (database && root === here) { await removeMigratedVKToken(root, database); await updateNumericAdminIds(root, database); }
-    accounts = requireAuth ? await createAccounts(root, { globalAdminIds, database }) : null; shared = requireAuth ? await createMediaStore(root, database) : null;
+    accounts = requireAuth ? await createAccounts(root, { globalAdminIds, database, secureCookies: origin?.startsWith('https://') }) : null; shared = requireAuth ? await createMediaStore(root, database) : null;
   } catch (error) { database?.close(); releaseLock(); throw error; }
   const deletingUsers = new Set();
   const workspaces = new Map(), pendingSync = new Set();
@@ -171,8 +173,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
-    const allowed = new Set([`localhost:${server.address().port}`, `127.0.0.1:${server.address().port}`]);
-    if (!allowed.has(req.headers.host) || (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`)) return json(res, 403, { error: 'Доступ разрешён только локальному приложению' });
+    if (!allowedRequest(req, server.address().port, origin)) return json(res, 403, { error: 'Недопустимый адрес или источник запроса' });
     if (req.method === 'POST' && req.headers['sec-fetch-site'] === 'cross-site') return json(res, 403, { error: 'Недопустимый источник запроса' });
     try {
       const path = new URL(req.url, `http://${req.headers.host}`).pathname;
@@ -257,5 +258,6 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
 }
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const app = await createApp();
-  app.listen(Number(process.env.PORT || 3210), '127.0.0.1', () => console.log(`Kero Header → http://localhost:${app.address().port}`));
+  for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => { if (app.listening) app.close(); });
+  app.listen(Number(process.env.PORT || 3210), process.env.HOST || '127.0.0.1', () => console.log(`Kero Header → ${process.env.PUBLIC_ORIGIN || `http://localhost:${app.address().port}`}`));
 }

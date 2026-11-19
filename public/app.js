@@ -6,14 +6,15 @@ import { coverSizeLabel, removeCoverSize } from './settings.js';
 import { decodePreview, createPreviewCache } from './previews.js';
 import { emptySpacePercent } from './coverage.js';
 import { createPhotoViewer } from './viewer.js';
-import { initialMode, createClient, createDemoBackend } from './demo.js';
+import { initialMode, createClient, createDemoBackend, createBrowserStore } from './demo.js';
 import { setupAuth, displayUsername } from './auth.js';
 import { setupAdmin } from './admin.js';
 const $ = selector => document.querySelector(selector);
 let rememberedMode;
 try { rememberedMode = localStorage.getItem('kero.mode'); } catch {}
-const mode = initialMode(location.search, rememberedMode), demoMode = mode === 'demo';
-const demoBackend = demoMode ? createDemoBackend() : null;
+const demoOnly = document.documentElement.dataset.demoOnly === 'true';
+const mode = initialMode(location.search, rememberedMode, demoOnly), demoMode = mode === 'demo';
+const demoBackend = demoMode ? createDemoBackend(demoOnly ? { store: createBrowserStore(globalThis.indexedDB, `kero-demo:${new URL('.', location.href).pathname}`) } : {}) : null;
 const client = createClient({ demoMode, demo: demoBackend });
 let currentUser = null;
 document.body.dataset.mode = mode;
@@ -1128,7 +1129,7 @@ window.addEventListener('scroll', () => { canvasBounds = null; }, true);
 $('#demo-badge').hidden = !demoMode;
 if (demoMode) {
   $('#community-link').removeAttribute('href'); $('#community-link').removeAttribute('aria-label');
-  $('[data-mode-choice=local]').hidden = false;
+  $('[data-mode-choice=local]').hidden = demoOnly;
   $('#install-cover').hidden = true;
   $('[data-source=vk]').hidden = true;
   $('#vk-actions').hidden = true;
@@ -1138,7 +1139,7 @@ document.querySelectorAll('[data-mode-choice]').forEach(button => {
   const target = button.dataset.modeChoice;
   button.setAttribute('aria-pressed', String(target === mode));
   button.onclick = action(async () => {
-    if (currentUser || target === mode || switchingMode) return;
+    if (demoOnly || currentUser || target === mode || switchingMode) return;
     if (!state || loading || generating || exporting || settingsSaving || libraryBusy || coverUploading || polling || state.sync.running || $('#import').disabled) { toast('Дождитесь завершения текущей операции'); return; }
     switchingMode = true;
     try {
@@ -1150,6 +1151,7 @@ document.querySelectorAll('[data-mode-choice]').forEach(button => {
   });
 });
 function enterMode(target) {
+  if (demoOnly) return;
   const url = new URL(location.href); url.searchParams.set('mode', target); location.replace(url.href);
 }
 function notifyAuthChange() { try { localStorage.setItem('kero.authChanged', crypto.randomUUID()); } catch {} }

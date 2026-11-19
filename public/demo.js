@@ -1,6 +1,7 @@
 import { defaults, validateSettings } from './settings.js';
 
-export function initialMode(search, remembered) {
+export function initialMode(search, remembered, demoOnly = false) {
+  if (demoOnly) return 'demo';
   const mode = new URLSearchParams(search).get('mode');
   return ['local', 'demo'].includes(mode) ? mode : remembered === 'demo' ? 'demo' : 'local';
 }
@@ -28,12 +29,12 @@ export function createClient({ demoMode, demo, fetcher = globalThis.fetch }) {
   };
 }
 
-export function createBrowserStore(factory = globalThis.indexedDB) {
+export function createBrowserStore(factory = globalThis.indexedDB, name = 'kero-demo-v1') {
   let opened;
   function open() {
     return opened ||= new Promise((resolve, reject) => {
       if (!factory) { reject(new Error('Браузер не поддерживает локальное хранилище фотографий')); return; }
-      const request = factory.open('kero-demo-v1', 1);
+      const request = factory.open(name, 1);
       request.onupgradeneeded = () => {
         request.result.createObjectStore('meta');
         request.result.createObjectStore('photos', { keyPath: 'id' });

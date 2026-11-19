@@ -1,0 +1,16 @@
+.git
+.github
+node_modules
+data
+cache
+config
+dist
+exports
+.env
+.env.*
+*.log
+*.tmp
+test
+README.md
+start.cmd
+stop.cmd

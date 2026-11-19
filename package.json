@@ -8,7 +8,10 @@
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",
     "test": "node --test",
-    "migrate": "node scripts/migrate.mjs"
+    "migrate": "node scripts/migrate.mjs",
+    "build:demo": "node scripts/build-demo.mjs",
+    "preview:demo": "node scripts/preview-static-demo.mjs",
+    "test:docker": "node scripts/check-docker.mjs"
   },
   "engines": {
     "node": ">=22.13.0"

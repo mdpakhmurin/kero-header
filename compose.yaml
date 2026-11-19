@@ -1,0 +1,28 @@
+name: kero-header
+
+services:
+  editor:
+    build: .
+    image: kero-header:local
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 90s
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3210}:3210"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3210"
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:${PORT:-3210}}"
+      GLOBAL_ADMIN_IDS: "${GLOBAL_ADMIN_IDS:-1}"
+    volumes:
+      - kero_data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  kero_data:
