@@ -31,6 +31,7 @@ test('migration preserves identities, sessions, roles, libraries, preferences an
   await writeJSON(join(bobRoot, 'cache/library.json'), { photos: { [id]: photo }, lastSync: null });
   await writeJSON(join(bobRoot, 'config/settings.json'), { ...defaults, rotation: 70 });
   const before = await readFile(join(root, 'data/accounts.json')); let store = await openDatabase(root, { legacyToken: 'legacy-private-token' });
+  alice.id = store.resolveUserId(alice.id); bob.id = store.resolveUserId(bob.id);
   try {
     assert.equal(store.stats().users, 2); assert.equal(store.stats().photos, 2); assert.equal((await readdir(join(root, 'data/blobs'))).length, 1);
     assert.equal(store.readDocument(alice.id, 'settings').rotation, 42); assert.equal(store.readDocument(bob.id, 'settings').rotation, 70);
@@ -92,7 +93,7 @@ test('a committed key rotation recovers from its durable staged key after an int
 
 test('rotation rolls back every token if any encrypted record is corrupt', async t => {
   const root = await rootFor(t), alice = legacyUser('rotation_one'), bob = legacyUser('rotation_two'); await originalAccounts(root, [alice, bob]);
-  const store = await openDatabase(root); store.setToken(alice.id, 'alice-secret'); store.setToken(bob.id, 'bob-secret');
+  const store = await openDatabase(root); alice.id = store.resolveUserId(alice.id); bob.id = store.resolveUserId(bob.id); store.setToken(alice.id, 'alice-secret'); store.setToken(bob.id, 'bob-secret');
   const before = inspect(root, db => db.prepare('SELECT * FROM vk_tokens WHERE user_id=?').get(bob.id));
   const fingerprint = inspect(root, db => db.prepare("SELECT value FROM metadata WHERE key='token_key_fingerprint'").get().value);
   const connection = new DatabaseSync(join(root, 'data/kero.sqlite')); connection.prepare('UPDATE vk_tokens SET tag=? WHERE user_id=?').run(Buffer.alloc(16), bob.id); connection.close();
@@ -144,5 +145,5 @@ test('a successfully migrated legacy token is removed from env without changing 
   const root = await rootFor(t), owner = legacyUser('env_owner', true); await originalAccounts(root, [owner]);
   await writeFile(join(root, '.env'), 'PORT=4321\nVK_TOKEN=old-private-token\nGLOBAL_ADMIN_IDS=' + owner.id + '\n');
   const store = await openDatabase(root, { legacyToken: 'old-private-token' });
-  try { assert.equal(await removeMigratedVKToken(root, store), true); const env = await readFile(join(root, '.env'), 'utf8'); assert.equal(env.includes('old-private-token'), false); assert.ok(env.includes('PORT=4321')); assert.ok(env.includes(owner.id)); assert.equal(store.getToken(owner.id), 'old-private-token'); } finally { store.close(); }
+  try { assert.equal(await removeMigratedVKToken(root, store), true); const env = await readFile(join(root, '.env'), 'utf8'); assert.equal(env.includes('old-private-token'), false); assert.ok(env.includes('PORT=4321')); assert.ok(env.includes(owner.id)); assert.equal(store.getToken(store.resolveUserId(owner.id)), 'old-private-token'); } finally { store.close(); }
 });

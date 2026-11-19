@@ -12,18 +12,19 @@ import { loadWorkspace } from './lib/workspaces.mjs';
 import { openDatabase } from './lib/database.mjs';
 import { redactToken } from './lib/token-vault.mjs';
 import { acquireAppLock } from './lib/app-lock.mjs';
-import { removeMigratedVKToken } from './lib/legacy-env.mjs';
+import { removeMigratedVKToken, updateNumericAdminIds } from './lib/legacy-env.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 try { process.loadEnvFile(join(here, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 
-export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder, coverInstaller = installCover, requireAuth = true, imageDownloader, globalAdminIds = (process.env.GLOBAL_ADMIN_IDS || '').split(','), encryptionKey, legacyToken } = {}) {
+export async function createApp(root = here, { vkFactory = createVK, folderOpener = openFolder, coverInstaller = installCover, requireAuth = true, imageDownloader, globalAdminIds, encryptionKey, legacyToken } = {}) {
   root = resolve(root);
+  globalAdminIds ??= root === here ? (process.env.GLOBAL_ADMIN_IDS || '').split(',') : [];
   const releaseLock = requireAuth ? acquireAppLock(root) : () => {};
   let accounts, shared, database;
   try {
     database = requireAuth ? await openDatabase(root, { encryptionKey, legacyToken: legacyToken ?? (root === here ? process.env.VK_TOKEN || '' : '') }) : null;
-    if (database && root === here) await removeMigratedVKToken(root, database);
+    if (database && root === here) { await removeMigratedVKToken(root, database); await updateNumericAdminIds(root, database); }
     accounts = requireAuth ? await createAccounts(root, { globalAdminIds, database }) : null; shared = requireAuth ? await createMediaStore(root, database) : null;
   } catch (error) { database?.close(); releaseLock(); throw error; }
   const deletingUsers = new Set();
@@ -32,7 +33,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
   function workspaceFor(user) {
     if (!requireAuth) return legacy;
     if (deletingUsers.has(user.id)) throw Object.assign(new Error('Аккаунт удаляется'), { status: 401 });
-    if (!workspaces.has(user.id)) workspaces.set(user.id, loadWorkspace(join(root, 'data/users', user.id), { shared, database, userId: user.id, inheritLegacy: user.legacyOwner }).catch(error => { workspaces.delete(user.id); throw error; }));
+    if (!workspaces.has(user.id)) workspaces.set(user.id, loadWorkspace(join(root, 'data/users', String(user.id)), { shared, database, userId: user.id, inheritLegacy: user.legacyOwner }).catch(error => { workspaces.delete(user.id); throw error; }));
     return workspaces.get(user.id);
   }
   let mutation = Promise.resolve();
@@ -175,6 +176,11 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
     if (req.method === 'POST' && req.headers['sec-fetch-site'] === 'cross-site') return json(res, 403, { error: 'Недопустимый источник запроса' });
     try {
       const path = new URL(req.url, `http://${req.headers.host}`).pathname;
+      if (path === '/__local/stop' && req.method === 'POST' && requireAuth) {
+        const input = await body(req, 1024);
+        if (typeof input.nonce !== 'string' || input.nonce !== releaseLock.nonce) return json(res, 403, { error: 'Недостаточно прав для остановки приложения' });
+        res.setHeader('Connection', 'close'); json(res, 200, { stopping: true }); if (server.listening) server.close(); return;
+      }
       if (path.startsWith('/api/')) {
         const handle = async () => {
           if (path === '/api/auth/session' && req.method === 'GET') return json(res, 200, { user: requireAuth ? accounts.describe(accounts.current(req)) : { id: 'local-preview', login: 'Локальный просмотр', hasFullAccess: true } });
@@ -200,13 +206,13 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
             }
             if (path === '/api/admin/users/delete') {
               const target = accounts.assertDelete(user, input.id);
-              if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(target.id)) throw new Error('Некорректный ID пользователя');
+              if (!Number.isSafeInteger(target.id) || target.id < 1) throw new Error('Некорректный ID пользователя');
               deletingUsers.add(target.id);
               try {
                 const active = await workspaces.get(target.id);
                 if (active?.sync.running) throw Object.assign(new Error('Дождитесь окончания синхронизации пользователя'), { status: 409 });
                 await accounts.deleteUser(user, target.id);
-                const userRoot = resolve(root, 'data/users', target.id), parent = resolve(root, 'data/users');
+                const userRoot = resolve(root, 'data/users', String(target.id)), parent = resolve(root, 'data/users');
                 if (!userRoot.startsWith(parent + '/') && !userRoot.startsWith(parent + '\\')) throw new Error('Некорректная папка пользователя');
                 await rm(userRoot, { recursive: true, force: true });
                 await shared.forget(userRoot); await shared.collect(); workspaces.delete(target.id);
@@ -242,8 +248,9 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       else res.end();
     }
   });
-  const cleanup = () => { for (const id of workspaces.keys()) releaseWorkspace(join(root, 'data/users', id)); database?.close(); releaseLock(); };
+  const cleanup = () => { for (const id of workspaces.keys()) releaseWorkspace(join(root, 'data/users', String(id))); database?.close(); releaseLock(); };
   server.once('close', () => { if (pendingSync.size) Promise.allSettled([...pendingSync]).then(cleanup); else cleanup(); });
+  server.once('listening', () => releaseLock.setPort?.(server.address().port));
   server.once('error', () => { if (!server.listening) cleanup(); });
   server.database = database;
   return server;

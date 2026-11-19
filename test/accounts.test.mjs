@@ -49,6 +49,7 @@ test('account routes gate all private data, protect cookies, hash passwords and 
   assert.match(registered.headers.get('set-cookie'), /HttpOnly; SameSite=Strict/);
   assert.match(registered.headers.get('set-cookie'), /Path=\//);
   const user = (await registered.json()).user;
+  assert.equal(user.id, 1); assert.equal(typeof user.id, 'number');
   assert.deepEqual(Object.keys(user).sort(), ['hasFullAccess', 'id', 'isAdmin', 'isGlobalAdmin', 'login']); assert.equal(user.login, 'alice');
   assert.equal((await stranger.call('/api/auth/register', { login: 'ALICE', password })).status, 409);
   assert.equal((await stranger.call('/api/auth/login', { login: 'alice', password: 'wrong' })).status, 401);

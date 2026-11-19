@@ -116,7 +116,7 @@ test('deleting users revokes sessions and removes only their references to share
   assert.equal((await f.global.call('admin/users/delete', { id: alice.user.id })).status, 200);
   assert.equal((await alice.call('auth/session')).status, 200); assert.equal((await (await alice.call('auth/session')).json()).user, null);
   assert.equal((await alice.call('state')).status, 401); assert.equal((await bob.image(id)).status, 200);
-  await assert.rejects(stat(join(f.root, 'data/users', alice.user.id)), { code: 'ENOENT' });
+  await assert.rejects(stat(join(f.root, 'data/users', String(alice.user.id))), { code: 'ENOENT' });
   assert.equal((await readdir(join(f.root, 'data/blobs'))).length, 1);
   await f.global.call('admin/users/delete', { id: bob.user.id }); assert.equal((await readdir(join(f.root, 'data/blobs'))).length, 0);
 });

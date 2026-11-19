@@ -1159,7 +1159,7 @@ $('#limited-demo').onclick = () => enterMode('demo');
 $('#limited-refresh').onclick = () => location.reload();
 const accountControls = $('#account-controls'), accountTrigger = $('#account-trigger'), accountMenu = $('#account-menu');
 $('#copy-account-id').onclick = action(async () => {
-  await navigator.clipboard.writeText(currentUser.id); toast('ID скопирован');
+  await navigator.clipboard.writeText(String(currentUser.id)); toast('ID скопирован');
 });
 function setAccountMenu(open, focusTrigger = false) {
   accountMenu.hidden = !open; accountTrigger.setAttribute('aria-expanded', String(open));
@@ -1206,7 +1206,11 @@ async function boot() {
     if (currentUser.hasFullAccess === false) { document.body.dataset.view = 'limited'; return; }
     previewCache.dispose();
     previewCache = createPreviewCache({ cacheName: `kero-user-${currentUser.id}-previews-v1`, busy: () => loading || generating || exporting || Boolean(drag || wheelTimer) });
-    try { await caches.delete('kero-previews-v1'); } catch {}
+    try {
+      await caches.delete('kero-previews-v1');
+      const oldCaches = await caches.keys();
+      await Promise.all(oldCaches.filter(name => /^kero-user-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}-previews-v1$/.test(name)).map(name => caches.delete(name)));
+    } catch {}
   }
   await refresh(); document.body.dataset.view = 'editor'; layoutDirty = true; draw();
 }
