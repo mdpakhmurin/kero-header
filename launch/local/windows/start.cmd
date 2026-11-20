@@ -1,7 +1,7 @@
 @echo off
 setlocal
 title Kero Header
-cd /d "%~dp0"
+cd /d "%~dp0..\..\.."
 where node >nul 2>nul
 if errorlevel 1 (
   echo Node.js 22.13 or newer is required. Install it from https://nodejs.org/
@@ -14,7 +14,7 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-node "%~dp0scripts\launch.mjs"
+node "%CD%\scripts\launch.mjs"
 if errorlevel 1 (
   echo.
   echo Kero Header could not start. See the error above.

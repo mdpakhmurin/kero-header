@@ -1,5 +1,5 @@
 import { generateAsync, shuffleSources, manualFrames, hitTest, selectionGeometry, selectionHit, resizeSelection, rotateSelection, floatingPanelPosition } from './collage.js';
-import { photoSource, librarySource, sortLibraryPhotos, selectedLibraryPhotos, canvasLayerOrder, createFavoritesView } from './library.js';
+import { photoSource, librarySource, sortLibraryPhotos, selectedLibraryPhotos, canvasLayerOrder, createFavoritesView, photoNameParts } from './library.js';
 import { createPhotoRenderer, previewDimensions, renderDimensions, fitCanvasSize, smooth, createFrameScheduler, createTransformLayers } from './render.js';
 import { createHistory, historyShortcut } from './history.js';
 import { coverSizeLabel, removeCoverSize } from './settings.js';
@@ -9,6 +9,8 @@ import { createPhotoViewer } from './viewer.js';
 import { initialMode, createClient, createDemoBackend, createBrowserStore } from './demo.js';
 import { setupAuth, displayUsername } from './auth.js';
 import { setupAdmin } from './admin.js';
+import { setupAccountEditor } from './account.js';
+import { touchPair, gestureFrame } from './gestures.js';
 const $ = selector => document.querySelector(selector);
 let rememberedMode;
 try { rememberedMode = localStorage.getItem('kero.mode'); } catch {}
@@ -35,6 +37,8 @@ const history = createHistory();
 const photoViewer = createPhotoViewer($('#photo-viewer'), {
   isFavorite: photo => Boolean(state?.favorites?.includes(photo.id)),
   onFavorite: photo => toggleFavorite(photo.id),
+  onRename: photo => openPhotoName(photo),
+  onRemove: photo => removePhotos([photo.id]),
   canAdd: photo => !loading && !generating && selectedLibraryPhotos([photo.id], state.photos, state.exclusions, state.settings.community).length > 0,
   onAdd: photo => {
     $('#photo-viewer').close(); libraryDialog.close();
@@ -44,6 +48,7 @@ const photoViewer = createPhotoViewer($('#photo-viewer'), {
 });
 const libraryDialog = $('#library-dialog'), libraryChosen = new Set();
 let libraryBusy = false, librarySession = 0, libraryRendered = 0, libraryFrame = null;
+let libraryVisible = [];
 let state, items = [], selected = null, filter = 'active', limit = 60, images = new Map(), drag, saveQueue = Promise.resolve(), toastTimer, polling = false, wheelTimer, loading = false, coverageTimer;
 let savedSettings, settingsSaving = false;
 let favoriteQueue = Promise.resolve();
@@ -106,6 +111,7 @@ function readSettings() {
   next.sizeDeviation = Number(form.elements.sizeDeviation.value);
   next.count = 0;
   next.layoutOrder = form.elements.layoutOrder.value;
+  next.layoutDirection = form.elements.layoutDirection.value;
   next.favoritesFirst = form.elements.favoritesFirst.value === 'true';
   next.background = form.elements.background.value;
   if (!form.reportValidity()) throw new Error('Проверьте параметры композиции');
@@ -125,6 +131,9 @@ function updateLabels() {
     option.setAttribute('aria-selected', String(selected)); if (selected) $('#favorites-order-value').textContent = option.textContent;
   }
   const order = form.elements.layoutOrder.value;
+  const ascending = form.elements.layoutDirection.value === 'asc', direction = $('#order-direction');
+  direction.disabled = order === 'random'; direction.classList.toggle('ascending', ascending);
+  direction.title = ascending ? 'По возрастанию' : 'По убыванию'; direction.setAttribute('aria-label', direction.title);
   for (const option of $('#order-menu').querySelectorAll('[role=option]')) {
     option.setAttribute('aria-selected', String(option.dataset.value === order));
     if (option.dataset.value === order) $('#order-value').textContent = option.textContent;
@@ -447,6 +456,9 @@ function updateSelection(visible) {
   const item = visible.find(i => i.instanceId === selected), image = item && images.get(item.id);
   selectionPanel.hidden = selectionOutline.hidden = !item || !image;
   if (!item || !image) { return; }
+  const favorite = state.favorites.includes(item.id), star = $('#favorite-selected');
+  star.classList.toggle('active', favorite); star.setAttribute('aria-pressed', String(favorite));
+  star.title = favorite ? 'Удалить из избранного' : 'Добавить в избранное'; star.setAttribute('aria-label', star.title);
   const rect = canvasBounds, wrap = canvasWrap.getBoundingClientRect();
   const scale = rect.width / state.settings.width, ratio = image.height / image.width, border = state.settings.border;
   const origin = { x: rect.left - wrap.left, y: rect.top - wrap.top };
@@ -474,6 +486,9 @@ function photoIcon(name) {
     exclude: '<circle cx="12" cy="12" r="8"/><path d="m6 6 12 12"/>',
     restore: '<path d="M3 10h11a6 6 0 0 1 0 12M3 10l5-5m-5 5 5 5"/>',
     favorite: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z"/>',
+    rename: '<path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/>',
+    delete: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7"/>',
+    more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   };
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('aria-hidden', 'true');
@@ -490,21 +505,17 @@ function renderLibrary({ append = false } = {}) {
   $('#vk-count').textContent = all.filter(p => librarySource(p) === 'vk').length;
   $('#local-count').textContent = all.filter(p => librarySource(p) === 'local').length;
   $('#library-count').textContent = pool.length;
-  if (libraryOrigin === 'local' && filter === 'missing') filter = 'active';
   $('#active-label').textContent = libraryOrigin === 'local' ? 'Добавленные' : 'Доступные';
-  $('#active-count').textContent = pool.filter(p => !excluded.has(p.id) && (libraryOrigin === 'local' || p.available)).length;
+  $('#active-count').textContent = pool.filter(p => !excluded.has(p.id)).length;
   $('#favorites-count').textContent = pool.filter(p => favorites.has(p.id) && !excluded.has(p.id)).length;
   $('#delete-files').disabled = loading || generating || Boolean(libraryBusy);
-  $('[data-filter=missing]').hidden = libraryOrigin === 'local';
   $('#delete-files').title = libraryOrigin === 'vk' ? 'Очистить файлы из VK' : 'Очистить файлы, добавленные с компьютера';
-  $('#missing-label').textContent = libraryOrigin === 'local' ? 'Нет файла' : 'Нет в кеше';
-  $('#missing-label').parentElement.title = libraryOrigin === 'local' ? 'Копия файла в проекте отсутствует. Импортируйте фотографию снова.' : 'Скачанный файл отсутствует. Повторите синхронизацию VK.';
-  $('#missing-count').textContent = pool.filter(p => !p.available && !excluded.has(p.id)).length;
   const known = new Set(state.photos.map(p => p.id));
   const excludedStubs = state.exclusions.filter(id => !known.has(id)).map(id => ({ id, title: id, available: false })).filter(p => librarySource(p) === libraryOrigin);
   $('#excluded-count').textContent = pool.filter(p => excluded.has(p.id)).length + excludedStubs.length;
   const visibleFavorites = favoritesView.ids(favorites, filter === 'favorites' ? `${librarySession}:${libraryOrigin}:${state.settings.community}` : null);
-  const list = sortLibraryPhotos([...pool, ...(filter === 'excluded' ? excludedStubs : [])].filter(p => filter === 'excluded' ? excluded.has(p.id) : filter === 'favorites' ? visibleFavorites.has(p.id) && !excluded.has(p.id) : filter === 'missing' ? !p.available && !excluded.has(p.id) : (libraryOrigin === 'local' || p.available) && !excluded.has(p.id)), order.key, order.direction);
+  const list = sortLibraryPhotos([...pool, ...(filter === 'excluded' ? excludedStubs : [])].filter(p => filter === 'excluded' ? excluded.has(p.id) : filter === 'favorites' ? visibleFavorites.has(p.id) && !excluded.has(p.id) : !excluded.has(p.id)), order.key, order.direction);
+  libraryVisible = list;
   document.querySelectorAll('.source-tab').forEach(button => { const active = button.dataset.source === libraryOrigin; button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active)); });
   document.querySelectorAll('[data-sort]').forEach(button => {
     const active = button.dataset.sort === order.key;
@@ -532,7 +543,10 @@ function renderLibrary({ append = false } = {}) {
       const actions = document.createElement('div'); actions.className = 'photo-actions';
       const star = document.createElement('button'); star.type = 'button'; star.className = 'photo-toggle photo-favorite'; star.append(photoIcon('favorite'));
       const view = document.createElement('button'); view.type = 'button'; view.className = 'photo-toggle photo-view'; view.append(photoIcon('view'));
-      actions.append(star, view); card.append(preview, badge, actions);
+      const rename = document.createElement('button'); rename.type = 'button'; rename.className = 'photo-toggle photo-rename'; rename.append(photoIcon('rename'));
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'photo-toggle photo-delete'; remove.append(photoIcon('delete'));
+      const more = document.createElement('button'); more.type = 'button'; more.className = 'photo-toggle photo-more'; more.append(photoIcon('more'));
+      actions.append(star, rename, remove, view, more); card.append(preview, badge, actions);
     }
     card.classList.toggle('excluded', excluded.has(photo.id)); card.classList.toggle('selected', libraryChosen.has(photo.id));
     const preview = card.querySelector('.photo-image'), actions = card.querySelector('.photo-actions');
@@ -553,6 +567,9 @@ function renderLibrary({ append = false } = {}) {
     star.setAttribute('aria-label', star.title + ': ' + photo.title); star.setAttribute('aria-pressed', String(favorites.has(photo.id)));
     star.setAttribute('aria-busy', String(pendingFavorites.has(photo.id))); star.disabled = !known.has(photo.id);
     star.onclick = action(() => toggleFavorite(photo.id));
+    const rename = card.querySelector('.photo-rename'); rename.title = 'Переименовать'; rename.setAttribute('aria-label', 'Переименовать: ' + photo.title); rename.disabled = !known.has(photo.id); rename.onclick = () => openPhotoName(photo);
+    const remove = card.querySelector('.photo-delete'); remove.title = 'Удалить или исключить'; remove.setAttribute('aria-label', 'Удалить или исключить: ' + photo.title); remove.onclick = action(() => removePhotos([photo.id]));
+    const more = card.querySelector('.photo-more'); more.title = 'Действия с фото'; more.setAttribute('aria-label', 'Действия с фото: ' + photo.title); more.onclick = () => openPhotoActions(photo, list);
     const view = card.querySelector('.photo-view'); view.disabled = !photo.available; view.title = 'Посмотреть фото';
     view.setAttribute('aria-label', 'Посмотреть фото: ' + photo.title); view.onclick = () => photoViewer.open(photo, list);
     const source = librarySource(photo) === 'vk' ? photoSource(photo) : null;
@@ -569,7 +586,7 @@ function renderLibrary({ append = false } = {}) {
   if (!sentinel.hidden && libraryDialog.open) libraryObserver.observe(sentinel);
   updateLibrarySelection();
   $('#library-empty').hidden = list.length > 0;
-  $('#library-empty').textContent = filter === 'favorites' ? 'В избранном пока нет фотографий. Нажмите звёздочку на фото.' : filter === 'excluded' ? 'Исключённых кадров нет. Выберите фотографии и нажмите «Исключить» внизу.' : filter === 'missing' ? 'Все файлы на месте.' : pool.length ? 'Ничего не найдено.' : libraryOrigin === 'vk' ? 'Здесь появятся фотографии из VK. Синхронизируйте библиотеку.' : 'Здесь появятся ваши фотографии. Нажмите «Загрузить».';
+  $('#library-empty').textContent = filter === 'favorites' ? 'В избранном пока нет фотографий. Нажмите звёздочку на фото.' : filter === 'excluded' ? 'Исключённых кадров нет. Выберите фотографии, нажмите «Удалить» и выберите исключение.' : pool.length ? 'Ничего не найдено.' : libraryOrigin === 'vk' ? 'Здесь появятся фотографии из VK. Синхронизируйте библиотеку.' : 'Здесь появятся ваши фотографии. Нажмите «Загрузить».';
   document.querySelectorAll('.filter').forEach(b => b.classList.toggle('active', b.dataset.filter === filter));
   if (order.key === 'ratio') requestLibraryMeasurements(list);
 }
@@ -581,7 +598,11 @@ function updateLibrarySelection() {
   $('#library-add').textContent = libraryBusy === 'add' ? 'Добавляем…' : ids.length ? `Добавить (${ids.length})` : 'Добавить выбранные';
   $('#library-add').title = eligible.length === ids.length ? 'Добавить выбранные фотографии на холст' : 'Для добавления выберите доступные фотографии без исключений';
   $('#library-exclude').disabled = Boolean(libraryBusy) || !ids.length;
-  $('#library-exclude').textContent = allExcluded ? 'Вернуть в генерацию' : 'Исключить';
+  $('#library-exclude').textContent = 'Удалить';
+  $('#library-restore').hidden = !allExcluded; $('#library-restore').disabled = Boolean(libraryBusy);
+  const allSelected = libraryVisible.length > 0 && libraryVisible.every(photo => libraryChosen.has(photo.id));
+  $('#library-select-all').disabled = Boolean(libraryBusy) || !libraryVisible.length;
+  $('#library-select-all').textContent = allSelected ? 'Снять выделение' : 'Выбрать все';
   for (const part of libraryDialog.querySelectorAll('.library-top, .library-sources, .library-filters, .library-content')) part.inert = Boolean(libraryBusy);
 }
 const libraryObserver = new IntersectionObserver(entries => {
@@ -624,18 +645,98 @@ $('#library-add').onclick = action(async () => {
     if (frames.length) libraryDialog.close();
   } finally { libraryBusy = false; updateLibrarySelection(); draw(); }
 });
-$('#library-exclude').onclick = action(async () => {
+$('#library-select-all').onclick = () => {
+  const remove = libraryVisible.length && libraryVisible.every(photo => libraryChosen.has(photo.id));
+  for (const photo of libraryVisible) { if (remove) libraryChosen.delete(photo.id); else libraryChosen.add(photo.id); }
+  renderLibrary();
+};
+$('#library-exclude').onclick = action(() => removePhotos([...libraryChosen]));
+$('#library-restore').onclick = action(async () => {
   if (libraryBusy || !libraryChosen.size) return;
-  const ids = [...libraryChosen], restoring = ids.every(id => state.exclusions.includes(id));
-  libraryBusy = 'exclude'; updateLibrarySelection();
+  const ids = new Set(libraryChosen); libraryBusy = 'restore'; updateLibrarySelection();
   try {
-    if (!restoring && !await confirmAction({ title: `Исключить фотографии (${ids.length})?`, description: 'Выбранные фотографии перестанут участвовать в генерации. Вернуть их можно во вкладке «Исключённые».', label: 'Исключить' })) return;
-    const next = new Set(state.exclusions);
-    for (const id of ids) { if (restoring) next.delete(id); else next.add(id); }
-    await save('exclusions', [...next]); state.exclusions = [...next];
-    if (selectedItem() && next.has(selectedItem().id)) selected = null;
-    libraryChosen.clear(); if (restoring) await loadImages(); draw(); renderLibrary();
+    state.exclusions = await save('exclusions', state.exclusions.filter(id => !ids.has(id)));
+    libraryChosen.clear(); await loadImages(); draw(); renderLibrary();
   } finally { libraryBusy = false; updateLibrarySelection(); }
+});
+async function removePhotos(ids) {
+  if (libraryBusy || !ids.length) return;
+  const dialog = $('#photo-delete-dialog'), deleteForm = dialog.querySelector('form');
+  deleteForm.reset(); dialog.returnValue = '';
+  deleteForm.querySelector('button[value=confirm]').classList.remove('danger'); deleteForm.querySelector('button[value=confirm]').classList.add('accent');
+  $('#photo-delete-title').textContent = `Фотографии: ${ids.length}`;
+  deleteForm.querySelector('button[value=confirm]').textContent = 'Исключить';
+  const choice = await new Promise(resolve => {
+    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm' ? deleteForm.elements.operation.value : null), { once: true }); dialog.showModal();
+  });
+  if (!choice) return;
+  libraryBusy = 'delete'; updateLibrarySelection();
+  try {
+    await favoriteQueue.catch(() => {});
+    if (choice === 'exclude') {
+      state.exclusions = await save('exclusions', [...new Set([...state.exclusions, ...ids])]);
+      selected = null;
+    } else {
+      const result = await save('photos/delete', { ids }), removed = new Set(result.ids);
+      items = items.filter(item => !removed.has(item.id)); history.clear(); selected = null; endDrag();
+      for (const id of removed) { const bitmap = images.get(id); if (bitmap) { photoRenderer.release(bitmap); bitmap.close(); images.delete(id); } librarySizes.delete(id); }
+      await refresh();
+    }
+    libraryChosen.clear(); photoViewer.remove(ids); draw(); renderLibrary();
+  } finally { libraryBusy = false; updateLibrarySelection(); }
+}
+$('#photo-delete-dialog').querySelector('form').onchange = event => {
+  const permanent = event.currentTarget.elements.operation.value === 'delete', button = event.currentTarget.querySelector('button[value=confirm]');
+  button.textContent = permanent ? 'Удалить' : 'Исключить'; button.classList.toggle('danger', permanent); button.classList.toggle('accent', !permanent);
+};
+let renamingPhoto = null, renamingBusy = false, finishPhotoName;
+function openPhotoName(photo) {
+  if ($('#photo-name-dialog').open) return Promise.resolve(null);
+  renamingPhoto = photo; $('#photo-name-error').hidden = true;
+  const { name, extension } = photoNameParts(photo);
+  $('#photo-name-form').elements.title.value = name; $('#photo-name-form').elements.title.maxLength = 200 - extension.length;
+  $('#photo-name-extension').textContent = extension; $('#photo-name-extension').hidden = !extension;
+  $('#photo-name-dialog').showModal(); $('#photo-name-form').elements.title.focus();
+  return new Promise(resolve => { finishPhotoName = resolve; });
+}
+$('#photo-name-dialog').addEventListener('close', () => { finishPhotoName?.(null); finishPhotoName = null; });
+$('#photo-name-cancel').onclick = () => { if (!renamingBusy) $('#photo-name-dialog').close(); };
+$('#photo-name-form').onsubmit = async event => {
+  event.preventDefault(); if (renamingBusy) return;
+  const dialog = $('#photo-name-dialog'), error = $('#photo-name-error'); error.hidden = true; renamingBusy = true; dialog.dataset.busy = 'true';
+  const fields = event.currentTarget.elements; for (const field of fields) field.disabled = true;
+  try {
+    const result = await save('photos/rename', { id: renamingPhoto.id, title: fields.title.value.trim() + photoNameParts(renamingPhoto).extension });
+    const update = { ...result, customTitle: result.title };
+    const photo = state.photos.find(photo => photo.id === result.id); if (photo) Object.assign(photo, update);
+    photoViewer.refreshPhoto(update); finishPhotoName?.(update); finishPhotoName = null;
+    renderLibrary(); dialog.close();
+  } catch (failure) { error.textContent = failure.message; error.hidden = false; }
+  finally { renamingBusy = false; delete dialog.dataset.busy; for (const field of fields) field.disabled = false; }
+};
+$('#photo-name-dialog').addEventListener('cancel', event => { if (renamingBusy) event.preventDefault(); });
+const photoActions = $('#photo-actions-dialog'); let menuPhoto, menuCollection;
+for (const [id, icon] of [['view', 'view'], ['favorite', 'favorite'], ['rename', 'rename'], ['delete', 'delete'], ['source', 'source']]) $('#photo-action-' + id).prepend(photoIcon(icon));
+function openPhotoActions(photo, collection) {
+  menuPhoto = photo; menuCollection = collection;
+  $('#photo-actions-title').textContent = photo.title;
+  $('#photo-action-view').disabled = !photo.available;
+  $('#photo-action-rename').disabled = !state.photos.some(saved => saved.id === photo.id);
+  $('#photo-action-favorite').disabled = $('#photo-action-rename').disabled;
+  const favorite = state.favorites.includes(photo.id), star = $('#photo-action-favorite');
+  star.lastChild.textContent = favorite ? 'Убрать из избранного' : 'В избранное'; star.classList.toggle('active', favorite);
+  const source = librarySource(photo) === 'vk' ? photoSource(photo) : null;
+  $('#photo-action-source').hidden = !source; if (source) $('#photo-action-source').href = source.href;
+  photoActions.showModal();
+}
+$('#photo-actions-close').onclick = () => photoActions.close();
+$('#photo-action-view').onclick = () => { photoActions.close(); photoViewer.open(menuPhoto, menuCollection); };
+$('#photo-action-rename').onclick = () => { const photo = menuPhoto; photoActions.close(); openPhotoName(photo); };
+$('#photo-action-delete').onclick = action(async () => { const id = menuPhoto.id; photoActions.close(); await removePhotos([id]); });
+$('#photo-action-favorite').onclick = action(async () => {
+  const button = $('#photo-action-favorite'); button.disabled = true;
+  try { await toggleFavorite(menuPhoto.id); const favorite = state.favorites.includes(menuPhoto.id); button.lastChild.textContent = favorite ? 'Убрать из избранного' : 'В избранное'; button.classList.toggle('active', favorite); }
+  finally { button.disabled = false; }
 });
 function confirmAction({ title, description, label, photo, danger = true }) {
   const dialog = $('#exclude-dialog'), image = $('#exclude-preview');
@@ -672,20 +773,10 @@ function toggleFavorite(id) {
     if (!state.photos.some(photo => photo.id === id)) return;
     const next = new Set(state.favorites || []); if (next.has(id)) next.delete(id); else next.add(id);
     state.favorites = await save('favorites', [...next]); changed = true;
-    if (state.settings.favoritesFirst) draw();
+    draw();
   });
   favoriteQueue = task;
   return task.finally(() => { pendingFavorites.delete(id); updateLibraryFavorites(changed); photoViewer.refreshFavorites(); });
-}
-async function toggleExclusion(id) {
-  const restoring = state.exclusions.includes(id);
-  if (!restoring && !await confirmAction({ title: 'Исключить фотографию?', description: 'Фотография больше не будет участвовать в генерации. Её можно вернуть во вкладке «Исключённые».', label: 'Исключить', photo: state.photos.find(p => p.id === id) })) return;
-  const next = restoring ? state.exclusions.filter(p => p !== id) : [...state.exclusions, id];
-  await save('exclusions', next); state.exclusions = next;
-  if (selectedItem()?.id === id) selected = null;
-  if (restoring) await loadImages();
-  renderLibrary(); draw();
-  toast(restoring ? 'Кадр снова участвует в генерации' : 'Кадр исключён. Вернуть его можно во вкладке «Исключённые».');
 }
 function generationProgress(value, message) {
   const percent = Math.max(0, Math.min(100, value));
@@ -740,6 +831,7 @@ form.addEventListener('change', action(e => {
   }
   updateSettings();
 }));
+$('#order-direction').onclick = () => { form.elements.layoutDirection.value = form.elements.layoutDirection.value === 'asc' ? 'desc' : 'asc'; updateLabels(); updateSettings(); };
 $('#save-settings').onclick = action(async () => {
   updateSettings();
   const snapshot = structuredClone(state.settings);
@@ -812,8 +904,18 @@ function itemAt(p) {
   }
   return null;
 }
+const canvasTouches = new Map();
 canvasWrap.onpointerdown = event => {
-  if (loading || generating || !event.isPrimary || event.button !== 0 || event.target.closest('.selection')) return;
+  if (loading || generating || event.button !== 0 || event.target.closest('.selection')) return;
+  if (event.pointerType === 'touch') {
+    canvasTouches.set(event.pointerId, point(event));
+    if (canvasTouches.size === 2 && selectedItem()) {
+      event.preventDefault(); const item = selectedItem();
+      drag = { item, start: { ...item }, gesture: touchPair(canvasTouches.values()), changed: Boolean(drag?.changed) };
+      canvasWrap.setPointerCapture(event.pointerId); canvasWrap.classList.add('transforming'); return;
+    }
+  }
+  if (!event.isPrimary) return;
   const p = point(event), current = visibleItems().find(i => i.instanceId === selected), image = images.get(selectedItem()?.id);
   const scale = (canvasBounds || canvas.getBoundingClientRect()).width / state.settings.width;
   const geometry = current && image && selectionGeometry(current, image.height / image.width, state.settings.border, scale);
@@ -833,9 +935,11 @@ canvasWrap.onpointerdown = event => {
 canvasWrap.onpointermove = event => {
   if (loading || generating) return;
   const p = point(event);
+  if (canvasTouches.has(event.pointerId)) canvasTouches.set(event.pointerId, p);
   if (!drag) { const cursor = itemAt(p) ? 'move' : 'default'; if (canvas.style.cursor !== cursor) canvas.style.cursor = cursor; return; }
   let next;
-  if (drag.handle?.type === 'resize') next = resizeSelection(drag.start, drag.handle, { x: drag.handle.x + p.x - drag.point.x, y: drag.handle.y + p.y - drag.point.y }, drag.ratio, state.settings.border);
+  if (drag.gesture) { const pair = touchPair(canvasTouches.values()); if (!pair) return; next = gestureFrame(drag.start, drag.gesture, pair); }
+  else if (drag.handle?.type === 'resize') next = resizeSelection(drag.start, drag.handle, { x: drag.handle.x + p.x - drag.point.x, y: drag.handle.y + p.y - drag.point.y }, drag.ratio, state.settings.border);
   else if (drag.handle?.type === 'rotate') next = { angle: rotateSelection(drag.start, p, drag.pointerAngle, event.shiftKey) };
   else next = { x: Math.max(-10000, Math.min(20000, drag.start.x + p.x - drag.point.x)), y: Math.max(-10000, Math.min(20000, drag.start.y + p.y - drag.point.y)) };
   if (!Object.entries(next).some(([key, value]) => Math.abs(drag.item[key] - value) > .0001)) return;
@@ -844,6 +948,7 @@ canvasWrap.onpointermove = event => {
 };
 const endDrag = () => {
   const wasDragging = Boolean(drag);
+  canvasTouches.clear();
   drag = null; canvasWrap.classList.remove('transforming', 'rotating');
   if (wasDragging) draw({ selectionOnly: true });
 };
@@ -885,7 +990,8 @@ function stepLayer(item, direction) {
 $('#layer-backward').onclick = action(() => editSelected(item => stepLayer(item, -1)));
 $('#layer-forward').onclick = action(() => editSelected(item => stepLayer(item, 1)));
 $('#remove').onclick = action(async () => { await editSelected(item => { items = items.filter(i => i !== item); selected = null; }); renderLibrary(); });
-$('#exclude-selected').onclick = action(() => selectedItem() && toggleExclusion(selectedItem().id));
+$('#exclude-selected').onclick = action(() => selectedItem() && removePhotos([selectedItem().id]));
+$('#favorite-selected').onclick = action(() => selectedItem() && toggleFavorite(selectedItem().id));
 async function restoreHistory(direction) {
   if (loading) throw new Error('Дождитесь загрузки изображений');
   const restored = history[direction](items);
@@ -956,6 +1062,18 @@ const coverDialog = $('#cover-dialog'), coverForm = $('#cover-form');
 function updateCoverSubmit() { $('#cover-submit').disabled = !coverPayload || !state.hasToken || coverUploading; }
 function showCoverError(message) { $('#cover-error').textContent = message; $('#cover-error').hidden = false; }
 $('#install-cover').onclick = action(async () => {
+  if (demoMode || exporting || generating || loading) return;
+  if (state.settings.width !== 1920 || state.settings.height !== 768) {
+    if (!await confirmAction({ title: 'Для VK нужен холст 1920 × 768', description: 'Изменить размер холста на 1920 × 768 перед установкой обложки?', label: 'Изменить размер', danger: false })) return;
+    const sizes = state.settings.coverSizes;
+    if (!sizes.some(size => size.width === 1920 && size.height === 768)) {
+      if (sizes.length >= 100) throw new Error('Удалите один размер холста, чтобы добавить размер VK');
+      state.settings.coverSizes = [...sizes, { width: 1920, height: 768, name: 'VK' }];
+    }
+    state.settings.width = 1920; state.settings.height = 768; fillForm(); updateSettings(); layoutDirty = true; draw();
+    return;
+  }
+
   if (demoMode) return;
   if (exporting || generating || loading) return;
   const session = ++coverSession;
@@ -1104,19 +1222,32 @@ document.querySelectorAll('dialog').forEach(dialog => dialog.addEventListener('c
   const rect = dialog.getBoundingClientRect();
   if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
 }));
+const compactEditor = matchMedia('(max-width:800px), (max-height:500px) and (max-width:1000px)');
 const workspace = $('.workspace'), parametersPanel = $('#parameters-panel'), parametersContent = $('#parameters-content'), parametersToggle = $('#toggle-parameters'), parametersShow = $('#show-parameters');
 function setParametersHidden(hidden) {
   closeCoverSizes(); closeOrderMenu(); closeFavoritesOrder();
   const focused = parametersPanel.contains(document.activeElement) || document.activeElement === parametersShow;
   workspace.classList.toggle('parameters-hidden', hidden); parametersContent.inert = hidden;
+  $('#parameters-backdrop').hidden = hidden || !compactEditor.matches;
+  $('#canvas-help').textContent = matchMedia('(pointer:coarse)').matches ? 'Одним пальцем — перемещение · Двумя — размер и поворот' : 'Перетаскивайте фото · Колесо — поворот · Shift + колесо — размер';
+  $('.editor-area').inert = !hidden && compactEditor.matches;
   parametersContent.setAttribute('aria-hidden', String(hidden)); parametersShow.hidden = !hidden;
   parametersToggle.setAttribute('aria-expanded', String(!hidden));
   if (focused) (hidden ? parametersShow : parametersToggle).focus({ preventScroll: true });
-  try { localStorage.setItem('kero.parametersHidden', String(hidden)); } catch {}
+  try { localStorage.setItem(compactEditor.matches ? 'kero.parametersHidden.mobile' : 'kero.parametersHidden', String(hidden)); } catch {}
 }
 parametersToggle.onclick = () => setParametersHidden(true);
 parametersShow.onclick = () => setParametersHidden(false);
-try { setParametersHidden(localStorage.getItem('kero.parametersHidden') === 'true'); } catch {}
+$('#parameters-backdrop').onclick = () => setParametersHidden(true);
+function restoreParametersPreference() {
+  try { const stored = localStorage.getItem(compactEditor.matches ? 'kero.parametersHidden.mobile' : 'kero.parametersHidden'); setParametersHidden(stored === 'true' || stored === null && compactEditor.matches); }
+  catch { setParametersHidden(compactEditor.matches); }
+}
+compactEditor.addEventListener('change', restoreParametersPreference);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && compactEditor.matches && !$('#parameters-backdrop').hidden && !document.querySelector('dialog[open], :popover-open')) { event.preventDefault(); setParametersHidden(true); }
+});
+restoreParametersPreference();
 function schedulePreviewResize() {
   canvasBounds = null;
   layoutDirty = true;
@@ -1184,7 +1315,16 @@ document.addEventListener('click', event => { if (!accountControls.contains(even
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && !accountMenu.hidden) { event.preventDefault(); event.stopPropagation(); setAccountMenu(false, true); }
 });
-const adminPanel = setupAdmin({ request: api, confirm: confirmAction, currentUser: () => currentUser });
+const accountEditor = setupAccountEditor({ request: api, onSelfChange: user => { currentUser = user; $('#account-name').textContent = displayUsername(user.login); toast('Изменения сохранены'); } });
+$('#change-login').onclick = action(async () => { setAccountMenu(false); await accountEditor.open(currentUser, 'login', true); });
+$('#change-password').onclick = action(async () => { setAccountMenu(false); await accountEditor.open(currentUser, 'password', true); });
+$('#account-demo').onclick = action(async () => {
+  setAccountMenu(false);
+  if (state && (loading || generating || exporting || settingsSaving || libraryBusy || coverUploading || polling || $('#import').disabled)) { toast('Дождитесь завершения текущей операции'); return; }
+  if (state && (items.length || hasUnsavedSettings()) && !await confirmAction({ title: 'Перейти в демо-режим?', description: 'Холст и несохранённые настройки будут сброшены. Данные аккаунта и демо хранятся отдельно.', label: 'Перейти', danger: false })) return;
+  await saveQueue; enterMode('demo');
+});
+const adminPanel = setupAdmin({ request: api, confirm: confirmAction, currentUser: () => currentUser, editAccount: (user, kind) => accountEditor.open(user, kind) });
 $('#open-admin').onclick = action(async () => { setAccountMenu(false); closeCoverSizes(); closeOrderMenu(); closeFavoritesOrder(); await adminPanel.open(); });
 $('#logout').onclick = action(async () => {
   setAccountMenu(false, true);

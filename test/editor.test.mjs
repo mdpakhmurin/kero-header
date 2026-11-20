@@ -28,7 +28,11 @@ test('undo shortcuts work with Russian layouts and both redo combinations', () =
 
 test('layout order defaults to random and accepts only known priorities', () => {
   assert.equal(validateSettings({}).layoutOrder, 'random');
-  for (const value of ['random', 'newest', 'oldest']) assert.equal(validateSettings({ layoutOrder: value }).layoutOrder, value);
+  for (const value of ['random', 'date', 'name']) assert.equal(validateSettings({ layoutOrder: value }).layoutOrder, value);
+  assert.equal(validateSettings({ layoutOrder: 'newest' }).layoutOrder, 'date');
+  assert.equal(validateSettings({ layoutOrder: 'oldest' }).layoutDirection, 'asc');
+  assert.equal(validateSettings({ layoutOrder: 'name', layoutDirection: 'asc' }).layoutDirection, 'asc');
+  assert.throws(() => validateSettings({ layoutDirection: 'wrong' }), /порядок кадров/);
   assert.throws(() => validateSettings({ layoutOrder: 'unsupported' }), /порядок кадров/);
 });
 import { emptySpacePercent } from '../public/coverage.js';

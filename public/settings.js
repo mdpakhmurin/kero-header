@@ -1,4 +1,4 @@
-export const defaults = { community: 'kero_comics', source: 'both', layoutOrder: 'random', favoritesFirst: false, width: 1920, height: 768, coverSizes: [{ width: 1920, height: 768, name: 'VK' }, { width: 1400, height: 280, name: 'Пикабу' }], photoSize: 310, sizeDeviation: 42, rotation: 24, count: 0, background: '#e3e3e3', border: 7, shadow: 24 };
+export const defaults = { community: 'kero_comics', source: 'both', layoutOrder: 'random', layoutDirection: 'desc', favoritesFirst: false, width: 1920, height: 768, coverSizes: [{ width: 1920, height: 768, name: 'VK' }, { width: 1400, height: 280, name: 'Пикабу' }], photoSize: 310, sizeDeviation: 42, rotation: 24, count: 0, background: '#e3e3e3', border: 7, shadow: 24 };
 
 export function validateSettings(value) {
   const s = { ...defaults };
@@ -26,7 +26,9 @@ export function validateSettings(value) {
   s.community = String(value.community ?? defaults.community).trim().replace(/^https?:\/\/(?:www\.)?vk\.(?:com|ru)\//, '').replace(/\/$/, '');
   if (!/^[\w.-]{1,100}$/.test(s.community)) throw new Error('Укажите короткое имя сообщества, например kero_comics');
   s.layoutOrder = value.layoutOrder ?? defaults.layoutOrder;
-  if (!['random', 'newest', 'oldest'].includes(s.layoutOrder)) throw new Error('Некорректный порядок кадров');
+  s.layoutDirection = value.layoutDirection ?? (s.layoutOrder === 'oldest' ? 'asc' : 'desc');
+  if (['newest', 'oldest'].includes(s.layoutOrder)) s.layoutOrder = 'date';
+  if (!['random', 'date', 'name'].includes(s.layoutOrder) || !['asc', 'desc'].includes(s.layoutDirection)) throw new Error('Некорректный порядок кадров');
   s.favoritesFirst = value.favoritesFirst ?? false;
   if (typeof s.favoritesFirst !== 'boolean') throw new Error('Некорректный порядок избранного');
   s.source = value.source ?? defaults.source;

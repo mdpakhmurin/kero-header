@@ -1,18 +1,13 @@
 import { photoSizeRange } from './settings.js';
-import { photoTime } from './library.js';
+import { orderPhotos } from './library.js';
 
 export function random(seed) {
   return () => { let t = seed += 0x6D2B79F5; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; };
 }
 function* generationSteps(photos, settings, seed) {
-  const r = random(seed), pool = [...photos].sort((a, b) => a.id.localeCompare(b.id));
-  const ordered = settings.layoutOrder === 'newest' || settings.layoutOrder === 'oldest';
-  if (ordered) pool.sort((a, b) => {
-    const av = photoTime(a), bv = photoTime(b);
-    if (av === null && bv !== null) return 1;
-    if (bv === null && av !== null) return -1;
-    return av !== null && bv !== null ? (av - bv) * (settings.layoutOrder === 'newest' ? -1 : 1) : 0;
-  });
+  const r = random(seed); let pool = [...photos].sort((a, b) => a.id.localeCompare(b.id));
+  const ordered = ['date', 'name', 'newest', 'oldest'].includes(settings.layoutOrder);
+  if (ordered) pool = orderPhotos(pool, settings.layoutOrder, settings.layoutDirection);
   else for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
   const selected = settings.count ? pool.slice(0, settings.count) : pool;
   if (!selected.length) return [];

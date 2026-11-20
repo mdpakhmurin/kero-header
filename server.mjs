@@ -14,6 +14,7 @@ import { redactToken } from './lib/token-vault.mjs';
 import { acquireAppLock } from './lib/app-lock.mjs';
 import { removeMigratedVKToken, updateNumericAdminIds } from './lib/legacy-env.mjs';
 import { parsePublicOrigin, allowedRequest } from './lib/web-origin.mjs';
+import { photoDisplayName, photoNameParts, renamedPhotoTitle } from './public/library.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 try { process.loadEnvFile(join(here, '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -58,17 +59,43 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
         let available = false;
         try { available = p.stored !== false && (await stat(imagePath(root, p))).size > 0; } catch (e) { if (e.code !== 'ENOENT') throw e; }
         const { url, hash, ...publicPhoto } = p;
-        return { ...publicPhoto, available, version: hash, src: `/images/${p.id}` };
+        return { ...publicPhoto, title: photoDisplayName(p), nameExtension: photoNameParts(p).extension, available, version: hash, src: `/images/${p.id}` };
       }));
       return json(res, 200, { settings, exclusions, favorites, photos, lastSync: library.lastSync, hasToken: Boolean(token), sync });
     }
     if (req.method === 'GET' && path === '/api/sync') return json(res, 200, sync);
     if (req.method !== 'POST') return json(res, 404, { error: 'Не найдено' });
     const input = await body(req);
+    if (path === '/api/photos/rename') {
+      if (sync.running) throw Object.assign(new Error('Дождитесь окончания синхронизации'), { status: 409 });
+      const photo = validId(input.id) && library.photos[input.id];
+      if (!photo) throw Object.assign(new Error('Фотография не найдена'), { status: 404 });
+      const title = renamedPhotoTitle(photo, input.title), nameExtension = photoNameParts(photo).extension;
+      const next = { ...library, photos: { ...library.photos, [input.id]: { ...photo, customTitle: title, nameExtension } } };
+      await writeJSON(join(root, 'cache/library.json'), next); library = next;
+      return json(res, 200, { id: input.id, title, nameExtension });
+    }
+    if (path === '/api/photos/delete') {
+      if (sync.running) throw Object.assign(new Error('Дождитесь окончания синхронизации'), { status: 409 });
+      if (!Array.isArray(input.ids) || !input.ids.length || input.ids.length > 100000 || !input.ids.every(id => validId(id) && (library.photos[id] || exclusions.includes(id)))) throw new Error('Выберите фотографии своей библиотеки');
+      const ids = [...new Set(input.ids)], removed = new Set(ids), next = { ...library, photos: { ...library.photos } };
+      for (const id of ids) delete next.photos[id];
+      const nextExclusions = exclusions.filter(id => !removed.has(id)), nextFavorites = favorites.filter(id => !removed.has(id));
+      if (workspace.database) workspace.database.saveWorkspace(workspace.userId, { library: next, exclusions: nextExclusions, favorites: nextFavorites });
+      else {
+        await writeJSON(join(root, 'cache/library.json'), next);
+        await writeJSON(join(root, 'config/exclusions.json'), nextExclusions); await writeJSON(join(root, 'config/favorites.json'), nextFavorites);
+      }
+      const previous = library; library = next; exclusions = nextExclusions; favorites = nextFavorites;
+      if (workspace.shared) { await workspace.shared.commit(root, library); await workspace.shared.collect(); }
+      else for (const id of ids) if (previous.photos[id]) await unlink(imagePath(root, previous.photos[id])).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      return json(res, 200, { ids, removed: ids.length });
+    }
     if (path === '/api/cover') {
       if (input.confirmed !== true) throw new Error('Подтвердите замену обложки сообщества');
       if (!token) throw new Error('Добавьте токен VK в настройках подключения. Ему нужен доступ к изменению обложки сообщества.');
       const community = coverCommunity(input.community), image = coverImage(input.data);
+      if (image.width !== 1920 || image.height !== 768) throw new Error('Для обложки VK нужен размер 1920 × 768');
       return json(res, 200, await coverInstaller({ community, image, call: userVK(token) }));
     }
     if (path === '/api/settings') { const next = validateSettings(input); await writeJSON(join(root, 'config/settings.json'), next); settings = next; return json(res, 200, settings); }
@@ -161,7 +188,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
       const metadata = await saveImage(root, id, data);
       const previousDate = library.photos[id]?.addedAt;
       const addedAt = Number.isFinite(previousDate) && previousDate > 0 ? previousDate : Date.now();
-      const photo = { id, source: 'local', addedAt, title: String(input.name || 'Изображение').slice(0, 200), ...metadata };
+      const photo = { id, source: 'local', addedAt, ...(library.photos[id]?.customTitle ? { customTitle: library.photos[id].customTitle, nameExtension: photoNameParts(library.photos[id]).extension } : {}), title: String(input.name || 'Изображение').slice(0, 200), ...metadata };
       library.photos[id] = photo;
       await writeJSON(join(root, 'cache/library.json'), library);
       return json(res, 200, { id });
@@ -190,6 +217,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
           if (path === '/api/auth/logout' && req.method === 'POST' && requireAuth) { await body(req, 4096); await accounts.logout(req, res); return json(res, 200, { loggedOut: true }); }
           const user = requireAuth ? accounts.current(req) : null;
           if (requireAuth && (!user || deletingUsers.has(user.id))) return json(res, 401, { error: 'Войдите в аккаунт или продолжите в демо-режиме' });
+          if (path === '/api/auth/change' && req.method === 'POST' && requireAuth) return json(res, 200, await accounts.changeCredentials(user, await body(req, 4096), req));
           if (path.startsWith('/api/admin/')) {
             if (!requireAuth) return json(res, 403, { error: 'Администрирование недоступно в тестовом режиме' });
             if (path === '/api/admin/state' && req.method === 'GET') return json(res, 200, accounts.adminState(user));
@@ -197,6 +225,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
             const input = await body(req, 8192);
             if (path === '/api/admin/policy') return json(res, 200, await accounts.updatePolicy(user, input));
             if (path === '/api/admin/users/update') return json(res, 200, await accounts.updateUser(user, input));
+            if (path === '/api/admin/users/credentials') return json(res, 200, await accounts.changeCredentials(user, input));
             if (path === '/api/admin/keys/create') return json(res, 200, await accounts.createKey(user, input));
             if (path === '/api/admin/keys/revoke') return json(res, 200, await accounts.revokeKey(user, input.id));
             if (path === '/api/admin/token-key/rotate') {
@@ -240,7 +269,7 @@ export async function createApp(root = here, { vkFactory = createVK, folderOpene
         const data = await readImage(workspace.root, library.photos[id]);
         res.writeHead(200, { 'Content-Type': library.photos[id].mime || 'application/octet-stream', 'Cache-Control': requireAuth ? 'private, no-store' : 'no-cache' }); res.end(data); return;
       }
-      const routes = { '/': ['index.html', 'text/html'], '/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/assets/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/app.js': ['app.js', 'text/javascript'], '/demo.js': ['demo.js', 'text/javascript'], '/auth.js': ['auth.js', 'text/javascript'], '/admin.js': ['admin.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'], '/library.js': ['library.js', 'text/javascript'], '/render.js': ['render.js', 'text/javascript'], '/previews.js': ['previews.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/history.js': ['history.js', 'text/javascript'], '/coverage.js': ['coverage.js', 'text/javascript'], '/viewer.js': ['viewer.js', 'text/javascript'] };
+      const routes = { '/gestures.js': ['gestures.js', 'text/javascript'], '/account.js': ['account.js', 'text/javascript'], '/': ['index.html', 'text/html'], '/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/assets/favicon.svg': ['assets/favicon.svg', 'image/svg+xml'], '/app.js': ['app.js', 'text/javascript'], '/demo.js': ['demo.js', 'text/javascript'], '/auth.js': ['auth.js', 'text/javascript'], '/admin.js': ['admin.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/assets/okak.png': ['assets/okak.png', 'image/png'], '/assets/pigeon.png': ['assets/pigeon.png', 'image/png'], '/collage.js': ['collage.js', 'text/javascript'], '/library.js': ['library.js', 'text/javascript'], '/render.js': ['render.js', 'text/javascript'], '/previews.js': ['previews.js', 'text/javascript'], '/settings.js': ['settings.js', 'text/javascript'], '/history.js': ['history.js', 'text/javascript'], '/coverage.js': ['coverage.js', 'text/javascript'], '/viewer.js': ['viewer.js', 'text/javascript'] };
       if (!routes[path]) return json(res, 404, { error: 'Не найдено' });
       const [file, type] = routes[path];
       res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-cache' }); res.end(await readFile(join(here, 'public', file)));

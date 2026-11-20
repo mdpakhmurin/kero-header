@@ -1,4 +1,5 @@
 import { defaults, validateSettings } from './settings.js';
+import { photoDisplayName, photoNameParts, renamedPhotoTitle } from './library.js';
 
 export function initialMode(search, remembered, demoOnly = false) {
   if (demoOnly) return 'demo';
@@ -66,13 +67,19 @@ export function createBrowserStore(factory = globalThis.indexedDB, name = 'kero-
     putPhoto(photo) {
       return transaction(['photos'], 'readwrite', store => {
         const photos = store('photos');
-        photos.get(photo.id).onsuccess = event => photos.put({ ...photo, addedAt: event.target.result?.addedAt || photo.addedAt });
+        photos.get(photo.id).onsuccess = event => photos.put({ ...event.target.result, ...photo, addedAt: event.target.result?.addedAt || photo.addedAt });
       });
     },
     clearPhotos() {
       return transaction(['meta', 'photos'], 'readwrite', (store, result) => {
         store('photos').getAllKeys().onsuccess = event => result(event.target.result);
         store('photos').clear(); store('meta').put([], 'exclusions'); store('meta').put([], 'favorites');
+      });
+    },
+    deletePhotos(ids) {
+      return transaction(['meta', 'photos'], 'readwrite', store => {
+        for (const id of ids) store('photos').delete(id);
+        for (const key of ['exclusions', 'favorites']) store('meta').get(key).onsuccess = event => store('meta').put((event.target.result || []).filter(id => !ids.includes(id)), key);
       });
     },
   };
@@ -98,7 +105,7 @@ export function createDemoBackend({ store = createBrowserStore(), urls = globalT
       photos: photos.map(({ blob, ...photo }) => {
         originals.set(photo.id, blob);
         if (!objectUrls.has(photo.id)) objectUrls.set(photo.id, urls.createObjectURL(blob));
-        return { ...photo, source: 'local', available: true, src: objectUrls.get(photo.id), version: photo.id.slice(6) };
+        return { ...photo, title: photoDisplayName(photo), nameExtension: photoNameParts(photo).extension, source: 'local', available: true, src: objectUrls.get(photo.id), version: photo.id.slice(6) };
       }),
     };
   }
@@ -126,6 +133,17 @@ export function createDemoBackend({ store = createBrowserStore(), urls = globalT
         const exclusions = [...new Set(data)].sort(); await store.saveMeta('exclusions', exclusions); return exclusions;
       }
       if (path === 'import') return importPhoto(data);
+      if (path === 'photos/rename') {
+        const photo = (await store.read()).photos.find(photo => photo.id === data.id);
+        if (!photo) throw new Error('Фотография не найдена');
+        const title = renamedPhotoTitle(photo, data.title), nameExtension = photoNameParts(photo).extension;
+        await store.putPhoto({ ...photo, customTitle: title, nameExtension }); return { id: photo.id, title, nameExtension };
+      }
+      if (path === 'photos/delete') {
+        const saved = await store.read(), owned = new Set([...saved.photos.map(photo => photo.id), ...(saved.exclusions || [])]);
+        if (!Array.isArray(data.ids) || !data.ids.length || data.ids.length > 100000 || !data.ids.every(id => owned.has(id))) throw new Error('Выберите фотографии своей библиотеки');
+        const ids = [...new Set(data.ids)]; await store.deletePhotos(ids); return { ids, removed: ids.length };
+      }
       if (path === 'files/delete' && data?.source === 'local') { const ids = await store.clearPhotos(); return { ids, removed: ids.length }; }
       throw new Error('Эта функция недоступна в демо-режиме');
     },

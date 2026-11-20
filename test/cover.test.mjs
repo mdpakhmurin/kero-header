@@ -7,6 +7,14 @@ import { coverCommunity, coverImage, installCover } from '../lib/cover.mjs';
 import { createApp as createAppServer } from '../server.mjs';
 const createApp = (root, options = {}) => createAppServer(root, { ...options, requireAuth: false });
 import { defaults, writeJSON } from '../lib/storage.mjs';
+import { deflateSync } from 'node:zlib';
+
+function coverPNG(width, height) {
+  const crc32 = bytes => { let crc = -1; for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0); } return (crc ^ -1) >>> 0; };
+  const chunk = (type, bytes) => { const name = Buffer.from(type), size = Buffer.alloc(4), crc = Buffer.alloc(4); size.writeUInt32BE(bytes.length); crc.writeUInt32BE(crc32(Buffer.concat([name, bytes]))); return Buffer.concat([size, name, bytes, crc]); };
+  const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.alloc((width * 4 + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
+}
 
 const png = await readFile(new URL('../public/assets/pigeon.png', import.meta.url));
 const image = coverImage(png.toString('base64'));
@@ -72,7 +80,7 @@ test('cover endpoint requires confirmation and token, keeps the sync community u
     vkFactory: () => async () => ({ type: 'group', object_id: 123 }),
     coverInstaller: async input => {
       installed++; assert.equal(input.community, 'other_public');
-      assert.equal(input.image.width, image.width);
+      assert.equal(input.image.width, 1920); assert.equal(input.image.height, 768);
       return { installed: true, page: 'https://vk.ru/club123' };
     },
   });
@@ -82,11 +90,12 @@ test('cover endpoint requires confirmation and token, keeps the sync community u
   const post = (path, data) => fetch(`${base}/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   // Explicitly clear any token inherited from the developer's environment.
   await post('token', { token: '' });
-  const payload = { community: 'https://vk.ru/other_public', data: png.toString('base64'), confirmed: true };
+  const payload = { community: 'https://vk.ru/other_public', data: coverPNG(1920, 768).toString('base64'), confirmed: true };
   assert.equal((await post('cover', payload)).status, 400);
   await post('token', { token: 'test-only-token' });
   assert.equal((await post('cover', { ...payload, confirmed: false })).status, 400);
   assert.equal((await post('cover', { ...payload, data: 'bad' })).status, 400);
+  assert.equal((await post('cover', { ...payload, data: coverPNG(1400, 280).toString('base64') })).status, 400);
   assert.equal(installed, 0);
   assert.equal((await (await post('cover', payload)).json()).installed, true);
   assert.equal(installed, 1);

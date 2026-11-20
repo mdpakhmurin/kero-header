@@ -12,5 +12,4 @@ exports
 *.tmp
 test
 README.md
-start.cmd
-stop.cmd
+launch/

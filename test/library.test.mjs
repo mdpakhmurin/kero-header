@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { librarySource, sortLibraryPhotos, selectedLibraryPhotos, createFavoritesView } from '../public/library.js';
+import { librarySource, sortLibraryPhotos, selectedLibraryPhotos, createFavoritesView, photoNameParts, photoDisplayName, renamedPhotoTitle } from '../public/library.js';
+
+test('renaming protects the original extension and handles old names without duplicating suffixes', () => {
+  const photo = { title: 'holiday.final.JPG', customTitle: 'Моя фотография' };
+  assert.deepEqual(photoNameParts(photo), {name:'Моя фотография',extension:'.JPG'});
+  assert.equal(photoDisplayName(photo), 'Моя фотография.JPG');
+  assert.equal(renamedPhotoTitle(photo,'Новое имя.jpg'), 'Новое имя.JPG');
+  for (const title of ['Без расширения','Другое.png','.JPG','']) assert.throws(() => renamedPhotoTitle(photo,title));
+  const vk = {title:'Фото VK'}; assert.equal(renamedPhotoTitle(vk,'Кадр 2'), 'Кадр 2');
+  assert.throws(() => renamedPhotoTitle(vk,'Кадр.png'), /Расширение/);
+});
 
 test('unstarred photos remain in the current favorites view across sorting and lazy loading', () => {
   const view = createFavoritesView(), favorites = new Set(['one', 'two', 'three']);

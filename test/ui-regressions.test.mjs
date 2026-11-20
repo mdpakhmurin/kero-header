@@ -33,6 +33,7 @@ class Element {
   emit(name, event) { for (const fn of this.listeners[name] || []) fn(event); }
   focus() { document.activeElement = this; }
   scrollIntoView() {}
+  setPointerCapture() {}
   showModal() { this.open = true; }
   close() { this.open = false; this.emit('close', {}); }
   showPopover() { this.emit('toggle', { newState: 'open' }); }
@@ -58,7 +59,7 @@ function add(root, id, tag = 'div') { const node = new Element(tag, id); root.ap
 
 test('viewer retains the displayed photo until the next is decoded and ignores late navigation results', async t => {
   const dialog = new Element('dialog'), wrap = add(dialog, undefined); wrap.className = 'viewer-image-wrap'; add(wrap, 'viewer-image', 'img');
-  for (const id of ['viewer-message', 'viewer-strip', 'viewer-position', 'viewer-previous', 'viewer-next', 'viewer-source', 'viewer-add', 'viewer-favorite', 'viewer-zoom-out', 'viewer-zoom-in', 'viewer-zoom-percent', 'viewer-fit', 'viewer-photo-name', 'viewer-close']) add(dialog, id);
+  for (const id of ['viewer-message', 'viewer-strip', 'viewer-position', 'viewer-previous', 'viewer-next', 'viewer-source', 'viewer-add', 'viewer-favorite', 'viewer-rename', 'viewer-delete', 'viewer-zoom-out', 'viewer-zoom-in', 'viewer-zoom-percent', 'viewer-fit', 'viewer-photo-name', 'viewer-close']) add(dialog, id);
   const images = environment(t, dialog), viewer = createPhotoViewer(dialog);
   const collection = ['a', 'b', 'c'].map(id => ({ id: `local_${id}`, source: 'local', available: true, src: `blob:${id}`, title: id }));
   viewer.open(collection[0], collection); images[0].load(); await flush();
@@ -71,7 +72,13 @@ test('viewer retains the displayed photo until the next is decoded and ignores l
   images.find(image => image.src === 'blob:c').load(); await flush(); assert.equal(dialog.querySelector('#viewer-image').src, 'blob:c');
   dialog.querySelector('#viewer-previous').onclick(); await flush();
   assert.equal(dialog.querySelector('#viewer-image').src, 'blob:b'); assert.equal(dialog.querySelector('#viewer-message').hidden, true);
-  dialog.close(); assert.equal(dialog.querySelector('#viewer-image').hidden, true);
+  const shown = dialog.querySelector('#viewer-image');
+  viewer.refreshPhoto({ id: 'local_b', title: 'Новое имя.png' });
+  assert.equal(dialog.querySelector('#viewer-image'), shown); assert.match(dialog.querySelector('#viewer-photo-name').textContent, /Новое имя.png/);
+  assert.equal(dialog.querySelector('#viewer-strip').children[1].title, 'Новое имя.png');
+  viewer.remove(['local_b']); await flush();
+  assert.equal(dialog.querySelector('#viewer-image').src, 'blob:c'); assert.equal(dialog.querySelector('#viewer-strip').children.length, 2);
+  viewer.remove(['local_a', 'local_c']); assert.equal(dialog.open, false); assert.equal(dialog.querySelector('#viewer-image').hidden, true);
 });
 
 test('viewer retries failed images and bounds its decoded image cache', async t => {
@@ -84,9 +91,24 @@ test('viewer retries failed images and bounds its decoded image cache', async t 
   cache.clear();
 });
 
+test('viewer touch controls swipe at fit size and pinch without accidentally navigating', async t => {
+  const dialog = new Element('dialog'), wrap = add(dialog, undefined); wrap.className = 'viewer-image-wrap'; add(wrap, 'viewer-image', 'img');
+  for (const id of ['viewer-message','viewer-strip','viewer-position','viewer-previous','viewer-next','viewer-source','viewer-add','viewer-favorite','viewer-rename','viewer-delete','viewer-zoom-out','viewer-zoom-in','viewer-zoom-percent','viewer-fit','viewer-photo-name','viewer-close']) add(dialog,id);
+  const images = environment(t,dialog), viewer = createPhotoViewer(dialog);
+  viewer.open({id:'a'},[{id:'a',title:'a',available:true,src:'blob:a'},{id:'b',title:'b',available:true,src:'blob:b'}]);
+  images[0].load(); await flush();
+  const touch = (id,x,y=200) => ({pointerId:id,pointerType:'touch',isPrimary:id===1,button:0,clientX:x,clientY:y,target:{closest:()=>false},preventDefault(){}});
+  wrap.onpointerdown(touch(1,800)); wrap.onpointermove(touch(1,500)); wrap.onpointerup(touch(1,500));
+  images.find(image=>image.src==='blob:b').load(); await flush(); assert.equal(dialog.querySelector('#viewer-image').src,'blob:b');
+  wrap.onpointerdown(touch(1,300)); wrap.onpointerdown(touch(2,700)); wrap.onpointermove(touch(2,1100));
+  assert.match(dialog.querySelector('#viewer-image').style.transform,/scale\(2\)/);
+  wrap.onpointerup(touch(2,1100)); assert.equal(dialog.querySelector('#viewer-image').src,'blob:b');
+  dialog.close();
+});
+
 test('admin policy changes retain row elements, control state and a clearly selected key type', async t => {
   const root = new Element(), dialog = add(root, 'admin-dialog', 'dialog');
-  for (const id of ['admin-error', 'admin-all-access', 'admin-open-registration', 'admin-users', 'admin-keys', 'admin-keys-empty', 'key-type-menu', 'key-type-trigger', 'key-type-value', 'key-hours-field', 'key-hours', 'admin-key-form', 'key-label', 'created-key', 'created-key-box', 'copy-created-key', 'admin-close', 'admin-encryption', 'rotate-token-key', 'token-key-status']) add(dialog, id);
+  for (const id of ['admin-audit', 'admin-error', 'admin-all-access', 'admin-open-registration', 'admin-users', 'admin-keys', 'admin-keys-empty', 'key-type-menu', 'key-type-trigger', 'key-type-value', 'key-hours-field', 'key-hours', 'admin-key-form', 'key-label', 'created-key', 'created-key-box', 'copy-created-key', 'admin-close', 'admin-encryption', 'rotate-token-key', 'token-key-status']) add(dialog, id);
   const menu = dialog.querySelector('#key-type-menu');
   for (const type of ['single', 'temporary', 'permanent']) { const button = new Element('button'); button.dataset.keyType = type; menu.append(button); }
   environment(t, root);
@@ -95,7 +117,7 @@ test('admin policy changes retain row elements, control state and a clearly sele
     calls.push({ path, input }); if (path === 'admin/policy') { await new Promise(resolve => { release = resolve; }); data = { ...data, policies: { ...data.policies, ...input }, users: data.users.map(user => ({ ...user, hasFullAccess: user.isAdmin })) }; } return data;
   } });
   await panel.open();
-  const rows = dialog.querySelector('#admin-users'), row = rows.children[1], checkbox = row.children[2].children[0], remove = row.children[4].children[0];
+  const rows = dialog.querySelector('#admin-users'), row = rows.children[1], checkbox = row.children[2].children[0], remove = row.children[4].children.at(-1);
   assert.equal(checkbox.disabled, true); assert.equal(remove.disabled, false);
   const allAccess = dialog.querySelector('#admin-all-access'); allAccess.checked = false; allAccess.onchange({ target: allAccess });
   assert.equal(dialog.dataset.busy, 'true'); assert.equal(rows.children[1], row); assert.equal(remove.disabled, false);

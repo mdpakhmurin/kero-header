@@ -19,11 +19,11 @@ const photo = id => ({ owner_id: -123, id, sizes: [{ width: 100, height: 100, ur
 
 test('saved layout order survives a server restart with the rest of the settings', async t => {
   const root = await fixture(t);
-  for (const layoutOrder of ['newest', 'oldest', 'random']) {
+  for (const layoutOrder of ['date', 'name', 'random']) {
     let server = await createApp(root);
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     let base = `http://127.0.0.1:${server.address().port}`;
-    const response = await fetch(`${base}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...defaults, layoutOrder, photoSize: 400 }) });
+    const response = await fetch(`${base}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...defaults, layoutOrder, layoutDirection: 'asc', photoSize: 400 }) });
     assert.equal(response.status, 200);
     await new Promise(resolve => server.close(resolve));
     server = await createApp(root);
@@ -31,7 +31,7 @@ test('saved layout order survives a server restart with the rest of the settings
     try {
       base = `http://127.0.0.1:${server.address().port}`;
       const settings = (await (await fetch(`${base}/api/state`)).json()).settings;
-      assert.equal(settings.layoutOrder, layoutOrder); assert.equal(settings.photoSize, 400);
+      assert.equal(settings.layoutOrder, layoutOrder); assert.equal(settings.layoutDirection, 'asc'); assert.equal(settings.photoSize, 400);
     } finally { await new Promise(resolve => server.close(resolve)); }
   }
 });
@@ -210,6 +210,7 @@ test('sync downloads and repairs excluded photos as well as active photos', asyn
   const call = async method => method === 'utils.resolveScreenName' ? { type: 'group', object_id: 123 } : method === 'photos.getAll' ? { count: 2, items: [photo(1), photo(2)] } : { count: 1, items: [{ attachments: [{ type: 'photo', photo: photo(1) }] }] };
   const run = async exclusions => { const s = status(); await syncLibrary({ root, settings: defaults, library, exclusions, status: s, call, download: async () => { downloads++; return png; } }); return s; };
   assert.equal((await run(['vk_-123_2'])).downloaded, 2); assert.equal(downloads, 2);
+  library.photos['vk_-123_1'].customTitle = 'Моё имя VK';
   assert.equal((await run([])).cached, 2); assert.equal(downloads, 2);
   await unlink(join(root, 'cache/images/vk_-123_1.png'));
   assert.equal((await run([])).downloaded, 1); assert.equal(downloads, 3);
@@ -218,6 +219,7 @@ test('sync downloads and repairs excluded photos as well as active photos', asyn
   await unlink(join(root, 'cache/images/vk_-123_2.png'));
   assert.equal((await run(['vk_-123_2'])).downloaded, 1); assert.equal(downloads, 5);
   assert.ok(await cacheValid(root, library.photos['vk_-123_1']));
+  assert.equal(library.photos['vk_-123_1'].customTitle, 'Моё имя VK');
   assert.ok(await cacheValid(root, library.photos['vk_-123_2']));
   assert.equal((await run([])).downloaded, 0);
   library.photos['vk_-123_3'] = { ...library.photos['vk_-123_2'], id: 'vk_-123_3', url: 'https://example.com/3.png' };
@@ -335,7 +337,7 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   server.close(); await once(server, 'close'); server = await createApp(root, { vkFactory });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); base = `http://127.0.0.1:${server.address().port}`;
   state = await (await fetch(base + '/api/state')).json();
-  assert.equal(state.settings.layoutOrder, 'newest');
+  assert.equal(state.settings.layoutOrder, 'date'); assert.equal(state.settings.layoutDirection, 'desc');
   assert.equal(state.settings.rotation, 50); assert.equal('seed' in state.settings, false); assert.equal('layout' in state, false); assert.deepEqual(state.exclusions, [id]);
   assert.equal(state.settings.width, 1600); assert.equal(state.settings.height, 600);
   assert.deepEqual(state.settings.coverSizes, coverSizes);

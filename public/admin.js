@@ -1,6 +1,6 @@
 import { displayUsername } from './auth.js';
 
-export function setupAdmin({ request, confirm, currentUser }) {
+export function setupAdmin({ request, confirm, currentUser, editAccount }) {
   const dialog = document.querySelector('#admin-dialog'), error = document.querySelector('#admin-error');
   const $ = selector => dialog.querySelector(selector);
   const users = new Map(), keys = new Map();
@@ -42,8 +42,17 @@ export function setupAdmin({ request, confirm, currentUser }) {
       if (busy || !await confirm({ title: 'Удалить пользователя «' + displayUsername(user.login) + '»?', description: 'Его аккаунт, личные настройки и библиотека будут удалены.', label: 'Удалить пользователя' })) return;
       await mutate('admin/users/delete', { id: user.id });
     };
-    actions.append(remove); element.append(nameCell, text('td', user.id, 'admin-user-id'), accessCell, roleCell, actions);
-    return { element, name, badge, access, role, remove };
+    const editButtons = ['login', 'password'].map(kind => {
+      const button = text('button', kind === 'login' ? 'Логин' : 'Пароль', 'button light small'); button.type = 'button';
+      button.onclick = async () => {
+        if (busy) return; setBusy(true);
+        try { const next = await editAccount(data.users.find(saved => saved.id === user.id), kind); if (next) data = next; }
+        finally { setBusy(false); render(); }
+      };
+      actions.append(button); return button;
+    });
+    actions.className = 'admin-user-actions'; actions.append(remove); element.append(nameCell, text('td', user.id, 'admin-user-id'), accessCell, roleCell, actions);
+    return { element, name, badge, access, role, remove, editButtons };
   }
   function updateUserRow(row, user) {
     const login = displayUsername(user.login); row.name.textContent = login; row.badge.hidden = !user.isGlobalAdmin;
@@ -53,6 +62,7 @@ export function setupAdmin({ request, confirm, currentUser }) {
     row.role.setAttribute('aria-label', 'Администратор: ' + login);
     row.remove.disabled = user.id === currentUser().id || user.isGlobalAdmin || user.isAdmin && !currentUser().isGlobalAdmin;
     row.remove.setAttribute('aria-label', 'Удалить пользователя ' + login);
+    for (const button of row.editButtons) button.disabled = user.id === currentUser().id || !currentUser().isGlobalAdmin && user.isAdmin;
   }
   const types = { single: 'Одноразовый', temporary: 'Временный', permanent: 'Постоянный' };
   function createKeyRow(key) {
@@ -73,6 +83,12 @@ export function setupAdmin({ request, confirm, currentUser }) {
     reconcile($('#admin-users'), users, data.users, createUserRow, updateUserRow);
     reconcile($('#admin-keys'), keys, [...data.keys].reverse(), createKeyRow, updateKeyRow);
     $('#admin-keys-empty').hidden = data.keys.length > 0;
+    const audit = $('#admin-audit'); audit.replaceChildren();
+    for (const event of data.audit || []) {
+      const row = text('div', '', 'audit-row');
+      row.append(text('time', new Date(event.createdAt).toLocaleString('ru-RU')), text('span', `${event.actorLogin} (#${event.actorId}) → ${event.targetLogin} (#${event.targetId})`), text('span', event.kind === 'password' ? 'Смена пароля' : `Логин: ${event.oldLogin} → ${event.newLogin}`)); audit.append(row);
+    }
+    if (!audit.children.length) audit.append(text('p', 'Изменений пока нет.', 'admin-note'));
   }
   $('#admin-all-access').onchange = event => { if (busy) render(); else mutate('admin/policy', { grantAllRegistered: event.target.checked }); };
   $('#admin-open-registration').onchange = event => { if (busy) render(); else mutate('admin/policy', { openRegistration: event.target.checked }); };

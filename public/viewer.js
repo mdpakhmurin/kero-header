@@ -1,4 +1,5 @@
 import { photoSource, librarySource } from './library.js';
+import { touchPair, swipeDirection } from './gestures.js';
 
 export function createViewerImageCache({ createImage = () => new Image(), maximum = 3 } = {}) {
   const entries = new Map();
@@ -32,7 +33,7 @@ export function imageViewport(image, viewport, zoom = 1, pan = { x: 0, y: 0 }) {
   return { zoom, fit, min, max, x: Math.max(-maxX, Math.min(maxX, pan.x)), y: Math.max(-maxY, Math.min(maxY, pan.y)), percent: fit * zoom * 100, canPan: maxX > 0 || maxY > 0 };
 }
 
-export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError = () => {}, isFavorite = () => false, onFavorite } = {}) {
+export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError = () => {}, isFavorite = () => false, onFavorite, onRename, onRemove } = {}) {
   let image = dialog.querySelector('#viewer-image');
   const message = dialog.querySelector('#viewer-message'), imageCache = createViewerImageCache();
   image.hidden = true;
@@ -41,6 +42,7 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
   const source = dialog.querySelector('#viewer-source');
   const add = dialog.querySelector('#viewer-add');
   const favorite = dialog.querySelector('#viewer-favorite');
+  const rename = dialog.querySelector('#viewer-rename'), remove = dialog.querySelector('#viewer-delete');
   const wrap = dialog.querySelector('.viewer-image-wrap'), zoomOut = dialog.querySelector('#viewer-zoom-out'), zoomIn = dialog.querySelector('#viewer-zoom-in');
   const zoomPercent = dialog.querySelector('#viewer-zoom-percent'), fitButton = dialog.querySelector('#viewer-fit');
   const zoomControls = [zoomOut, zoomIn, zoomPercent, fitButton];
@@ -49,6 +51,22 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
   let adding = false, addedPhoto = null;
   let savingFavorite = false;
   let showVersion = 0, changing = false, messageTimer;
+  let editingFile = false;
+  function renderFileActions() {
+    rename.hidden = !onRename; remove.hidden = !onRemove;
+    rename.disabled = remove.disabled = editingFile || changing || !photos[index];
+  }
+  for (const [button, callback] of [[rename, onRename], [remove, onRemove]]) button.onclick = async () => {
+    if (editingFile || !photos[index] || !callback) return;
+    editingFile = true; renderFileActions();
+    try { await callback(photos[index]); } catch (failure) { onError(failure); }
+    finally { editingFile = false; renderFileActions(); renderAdd(); }
+  };
+  function renderCaption() {
+    const photo = photos[index]; if (!photo) return;
+    const dimensions = !changing && !image.hidden && image.naturalWidth ? ` · ${image.naturalWidth} × ${image.naturalHeight} px` : '';
+    dialog.querySelector('#viewer-photo-name').textContent = (photo.title || 'Фото из VK') + dimensions;
+  }
   function renderFavorite() {
     const photo = photos[index], selected = photo && isFavorite(photo);
     favorite.hidden = !onFavorite; favorite.disabled = !photo; favorite.setAttribute('aria-busy', String(savingFavorite));
@@ -113,17 +131,39 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
     const rect = wrap.getBoundingClientRect();
     setZoom(zoom * Math.exp(-event.deltaY * .0015), { x: event.clientX - rect.left - rect.width / 2, y: event.clientY - rect.top - rect.height / 2 });
   }, { passive: false });
+  const touches = new Map();
   wrap.onpointerdown = event => {
-    if (!event.isPrimary || event.button !== 0 || event.target.closest('.viewer-zoom-toolbar') || !geometry()?.canPan) return;
+    const view = geometry();
+    if (event.button !== 0 || event.target.closest('.viewer-zoom-toolbar') || !view) return;
+    if (event.pointerType === 'touch') {
+      event.preventDefault(); touches.set(event.pointerId, { x: event.clientX, y: event.clientY }); wrap.setPointerCapture(event.pointerId);
+      if (touches.size === 2) { drag = { pair: touchPair(touches.values()), zoom, pan: { ...pan } }; return; }
+      if (touches.size > 2) return;
+      drag = { x: event.clientX, y: event.clientY, pan: { ...pan }, swipe: !view.canPan, time: Date.now() }; return;
+    }
+    if (!event.isPrimary || !view.canPan) return;
     event.preventDefault(); drag = { x: event.clientX, y: event.clientY, pan: { ...pan } };
     wrap.setPointerCapture(event.pointerId); wrap.classList.add('dragging');
   };
   wrap.onpointermove = event => {
+    if (touches.has(event.pointerId)) touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
     if (!drag) return;
+    if (drag.pair) {
+      const pair = touchPair(touches.values()), view = geometry(); if (!pair || !view) return;
+      const rect = wrap.getBoundingClientRect(), target = Math.max(view.min, Math.min(view.max, drag.zoom * pair.distance / drag.pair.distance)), scale = target / drag.zoom;
+      const origin = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      pan = { x: pair.x - origin.x + (drag.pan.x - drag.pair.x + origin.x) * scale, y: pair.y - origin.y + (drag.pan.y - drag.pair.y + origin.y) * scale };
+      zoom = target; renderZoom(); return;
+    }
+    if (drag.swipe) return;
     pan = { x: drag.pan.x + event.clientX - drag.x, y: drag.pan.y + event.clientY - drag.y }; renderZoom();
   };
-  const endDrag = () => { drag = null; wrap.classList.remove('dragging'); };
-  wrap.onpointerup = wrap.onpointercancel = endDrag;
+  const endDrag = () => { drag = null; touches.clear(); wrap.classList.remove('dragging'); };
+  wrap.onpointerup = event => {
+    const direction = drag?.swipe ? swipeDirection(drag, { x: event.clientX, y: event.clientY, time: Date.now() }) : 0;
+    endDrag(); if (direction) show(index + direction);
+  };
+  wrap.onpointercancel = wrap.onlostpointercapture = endDrag;
   window.addEventListener('resize', () => { if (dialog.open) renderZoom(); });
 
   async function show(target) {
@@ -133,10 +173,7 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
     index = Math.max(0, Math.min(photos.length - 1, target));
     const photo = photos[index];
     const version = ++showVersion; changing = true; clearTimeout(messageTimer); message.hidden = true;
-    renderAdd(); renderFavorite();
-    const caption = dialog.querySelector('#viewer-photo-name');
-    const name = photo.source === 'vk' ? 'Фото из VK' : photo.title;
-    caption.textContent = name;
+    renderAdd(); renderFavorite(); renderFileActions(); renderCaption();
     position.textContent = `${index + 1} / ${photos.length}`;
     previous.disabled = index === 0; next.disabled = index === photos.length - 1;
     endDrag(); wrap.setAttribute('aria-busy', 'true');
@@ -154,7 +191,7 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
       clearTimeout(messageTimer); message.hidden = true; changing = false; wrap.setAttribute('aria-busy', 'false');
       prepared.id = 'viewer-image'; prepared.alt = photo.title; prepared.draggable = false; prepared.hidden = false; prepared.style.transform = '';
       if (prepared !== image) image.replaceWith(prepared); image = prepared;
-      caption.textContent = `${name} · ${image.naturalWidth} × ${image.naturalHeight} px`;
+      renderCaption(); renderFileActions();
       fit();
       for (const neighbor of [photos[index - 1], photos[index + 1]]) if (neighbor) imageCache.load(neighbor.src).catch(() => {});
     } catch {
@@ -162,6 +199,7 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
       clearTimeout(messageTimer); changing = false; wrap.setAttribute('aria-busy', 'false'); image.hidden = true;
       message.classList.remove('loading'); message.hidden = false; message.textContent = 'Не удалось открыть изображение. Обновите библиотеку или выполните синхронизацию.';
       zoomControls.forEach(control => control.disabled = true);
+      renderFileActions();
     }
   }
 
@@ -192,12 +230,7 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
     addedPhoto = null;
   });
 
-  return {
-    refreshFavorites: renderFavorite,
-    open(photo, collection) {
-      photos = collection.filter(candidate => candidate.available && candidate.src);
-      const start = photos.findIndex(candidate => candidate.id === photo.id);
-      if (start < 0) return;
+  function renderThumbs() {
       strip.replaceChildren();
       thumbs = photos.map((candidate, i) => {
         const button = document.createElement('button'); button.type = 'button'; button.className = 'viewer-thumb';
@@ -206,7 +239,27 @@ export function createPhotoViewer(dialog, { onAdd, canAdd = () => true, onError 
         button.append(thumbnail); button.onclick = () => show(i); strip.append(button);
         return button;
       });
-      dialog.showModal(); show(start);
+  }
+  return {
+    refreshFavorites: renderFavorite,
+    refreshPhoto(update) {
+      for (const photo of photos) if (photo.id === update.id) Object.assign(photo, update);
+      photos.forEach((photo, i) => { thumbs[i].title = photo.title; thumbs[i].setAttribute('aria-label', `Фото ${i + 1}: ${photo.title}`); });
+      if (photos[index]?.id === update.id) { image.alt = update.title; renderCaption(); }
+    },
+    remove(ids) {
+      if (!dialog.open) return;
+      const removed = new Set(ids), current = photos[index]?.id;
+      photos = photos.filter(photo => !removed.has(photo.id));
+      if (!photos.length) { dialog.close(); return; }
+      const keep = photos.findIndex(photo => photo.id === current);
+      renderThumbs(); show(keep >= 0 ? keep : Math.min(index, photos.length - 1));
+    },
+    open(photo, collection) {
+      photos = collection.filter(candidate => candidate.available && candidate.src);
+      const start = photos.findIndex(candidate => candidate.id === photo.id);
+      if (start < 0) return;
+      renderThumbs(); dialog.showModal(); show(start);
     },
   };
 }

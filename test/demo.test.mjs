@@ -10,7 +10,8 @@ function memoryStore() {
   return {
     async read() { return structuredClone({ settings: meta.get('settings'), exclusions: meta.get('exclusions'), favorites: meta.get('favorites'), photos: [...photos.values()] }); },
     async saveMeta(key, value) { meta.set(key, structuredClone(value)); },
-    async putPhoto(photo) { photos.set(photo.id, structuredClone({ ...photo, addedAt: photos.get(photo.id)?.addedAt || photo.addedAt })); },
+    async putPhoto(photo) { photos.set(photo.id, structuredClone({ ...photos.get(photo.id), ...photo, addedAt: photos.get(photo.id)?.addedAt || photo.addedAt })); },
+    async deletePhotos(ids) { for (const id of ids) photos.delete(id); for (const key of ['favorites', 'exclusions']) meta.set(key, (meta.get(key) || []).filter(id => !ids.includes(id))); },
     async clearPhotos() { const ids = [...photos.keys()]; photos.clear(); meta.set('exclusions', []); meta.set('favorites', []); return ids; },
   };
 }
@@ -29,6 +30,24 @@ test('demo mode is selected before startup requests; explicit URL mode overrides
   assert.equal(initialMode('?mode=unknown', null), 'local');
   assert.equal(initialMode('?mode=local', 'local', true), 'demo');
   assert.equal(initialMode('', 'local', true), 'demo');
+});
+
+test('demo renames and deletes selected originals locally, preserving other photos and preferences', async () => {
+  const f = fixture(), original = file(), first = (await f.client.request('import', { file: original, dimensions: { width: 1, height: 1 } })).id;
+  const other = new File([await original.arrayBuffer(), 'other'], 'other.png');
+  const second = (await f.client.request('import', { file: other, dimensions: { width: 1, height: 1 } })).id;
+  await f.client.request('favorites', [first, second]); await f.client.request('exclusions', [first]);
+  await f.client.request('photos/rename', { id: first, title: 'Новое имя.png' });
+  for (const title of ['Новое имя.jpg', 'Без расширения']) await assert.rejects(f.client.request('photos/rename', { id: first, title }), /Расширение/);
+  assert.equal((await f.client.request('state')).photos.find(photo => photo.id === first).title, 'Новое имя.png');
+  await f.client.request('import', { file: original, dimensions: { width: 1, height: 1 } });
+  assert.equal((await f.client.request('state')).photos.find(photo => photo.id === first).title, 'Новое имя.png');
+  await assert.rejects(f.client.request('photos/rename', { id: first, title: '' }));
+  await assert.rejects(f.client.request('photos/delete', { ids: ['local_foreign'] }));
+  await f.client.request('photos/delete', { ids: [first] });
+  const state = await f.client.request('state'); assert.deepEqual(state.photos.map(photo => photo.id), [second]);
+  assert.deepEqual(state.favorites, [second]); assert.deepEqual(state.exclusions, []); assert.equal(f.network(), 0);
+  assert.equal(f.revoked.length, 1);
 });
 
 test('demo imports, persists, reads and exports originals entirely within browser storage', async () => {

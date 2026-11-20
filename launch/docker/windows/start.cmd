@@ -1,7 +1,7 @@
 @echo off
 setlocal
 title Kero Header - Docker
-cd /d "%~dp0"
+cd /d "%~dp0..\..\.."
 where docker >nul 2>nul
 if errorlevel 1 (
   echo Docker is not installed. Install Docker Desktop and try again.
@@ -23,7 +23,7 @@ echo.
 echo Kero Header is running. Published address:
 docker compose port editor 3210
 echo Open http://localhost at the port shown above, or PUBLIC_ORIGIN from .env.
-echo Use stop-docker.cmd to stop the editor.
+echo Use stop.cmd to stop the editor.
 pause
 exit /b 0
 

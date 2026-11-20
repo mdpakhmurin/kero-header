@@ -19,7 +19,7 @@ const call = async (path, input) => {
   const next = response.headers.get('set-cookie'); if (next) cookie = next.split(';')[0]; assert.ok(response.ok, `API ${path}: ${response.status}`); return response.json();
 };
 try {
-  if (process.platform === 'linux') execFileSync('sh', ['start-docker.sh'], { ...options, stdio: 'inherit' });
+  if (process.platform === 'linux') execFileSync('sh', ['launch/docker/linux/start.sh'], { ...options, stdio: 'inherit' });
   else compose(['up', '--build', '-d']);
   await ready();
   assert.equal((await call('auth/register', { login: 'docker_smoke', password: 'Docker test password 123!' })).user.id, 1);
@@ -34,7 +34,7 @@ try {
   console.log('Docker: запуск, регистрация, сохранение данных и ключа, обычный и аварийный перезапуск проверены.');
 } finally {
   if (process.platform === 'linux') {
-    try { execFileSync('sh', ['stop-docker.sh'], { ...options, stdio: 'inherit' }); }
+    try { execFileSync('sh', ['launch/docker/linux/stop.sh'], { ...options, stdio: 'inherit' }); }
     finally { compose(['down', '--volumes', '--remove-orphans']); }
   } else compose(['down', '--volumes', '--remove-orphans']);
 }

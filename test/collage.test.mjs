@@ -92,3 +92,12 @@ test('scarce photos spread their usable area without increasing their size', () 
   assert.ok(coveredFraction(items, photos, settings) > coveredFraction(randomPositions, photos, settings) + .1);
   assert.ok(items.every(item => item.width <= settings.maxSize));
 });
+
+test('name and date direction choose priority photos consistently without changing coverage rules', () => {
+  const photos = [{ id: 'one', title: 'Кадр 10', width: 100, height: 100, date: 100 }, { id: 'two', title: 'Кадр 2', width: 100, height: 100, date: 200 }];
+  const settings = { width: 500, height: 300, photoSize: 200, sizeDeviation: 0, rotation: 0, border: 0 };
+  assert.deepEqual(generate(photos, { ...settings, layoutOrder: 'name', layoutDirection: 'asc' }, 1).map(frame => frame.id), ['one', 'two']);
+  assert.deepEqual(generate(photos, { ...settings, layoutOrder: 'name', layoutDirection: 'desc' }, 1).map(frame => frame.id), ['two', 'one']);
+  assert.deepEqual(generate(photos, { ...settings, layoutOrder: 'date', layoutDirection: 'asc' }, 1).map(frame => frame.id), ['two', 'one']);
+  assert.deepEqual(generate(photos, { ...settings, layoutOrder: 'date', layoutDirection: 'desc' }, 1).map(frame => frame.id), ['one', 'two']);
+});
