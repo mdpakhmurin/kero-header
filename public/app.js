@@ -1,5 +1,5 @@
 import { generateAsync, shuffleSources, manualFrames, hitTest, selectionGeometry, selectionHit, resizeSelection, rotateSelection, floatingPanelPosition } from './collage.js';
-import { photoSource, librarySource, sortLibraryPhotos, selectedLibraryPhotos, canvasLayerOrder, createFavoritesView, photoNameParts } from './library.js';
+import { photoSource, librarySource, sortLibraryPhotos, selectedLibraryPhotos, canvasLayerOrder, createFavoritesView, photoNameParts, setupLibraryMenus } from './library.js';
 import { createPhotoRenderer, previewDimensions, renderDimensions, fitCanvasSize, smooth, createFrameScheduler, createTransformLayers } from './render.js';
 import { createHistory, historyShortcut } from './history.js';
 import { coverSizeLabel, removeCoverSize } from './settings.js';
@@ -549,7 +549,7 @@ function renderLibrary({ append = false } = {}) {
     }
     card.classList.toggle('excluded', excluded.has(photo.id)); card.classList.toggle('selected', libraryChosen.has(photo.id));
     const preview = card.querySelector('.photo-image'), actions = card.querySelector('.photo-actions');
-    preview.title = 'Выбрать фотографию'; preview.setAttribute('aria-label', 'Выбрать фотографию: ' + photo.title);
+    preview.setAttribute('aria-label', 'Выбрать фотографию: ' + photo.title);
     preview.setAttribute('aria-pressed', String(libraryChosen.has(photo.id)));
     preview.onclick = () => {
       if (libraryChosen.has(photo.id)) libraryChosen.delete(photo.id); else libraryChosen.add(photo.id);
@@ -613,14 +613,10 @@ function openLibrary() {
   closeCoverSizes(); libraryChosen.clear(); librarySession++; limit = 60;
   libraryDialog.showModal(); renderLibrary(); $('#library-content').scrollTop = 0;
 }
-libraryDialog.addEventListener('pointerdown', event => {
-  const touched = event.pointerType === 'touch' ? event.target.closest('.photo-card') : null;
-  for (const card of $('#library-grid').children) card.classList.toggle('touch-active', card === touched);
-});
+setupLibraryMenus(libraryDialog, $('#library-grid'));
 document.querySelectorAll('[data-open-library]').forEach(button => button.onclick = openLibrary);
 $('#library-close').onclick = $('#library-cancel').onclick = () => libraryDialog.close();
 libraryDialog.addEventListener('close', () => {
-  for (const card of $('#library-grid').children) card.classList.remove('touch-active');
   favoritesView.reset();
   librarySession++; libraryChosen.clear(); libraryObserver.unobserve($('#library-sentinel'));
   if (libraryFrame !== null) { cancelAnimationFrame(libraryFrame); libraryFrame = null; }

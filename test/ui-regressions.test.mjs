@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createPhotoViewer, createViewerImageCache } from '../public/viewer.js';
 import { setupAdmin } from '../public/admin.js';
 import { defaults, validateSettings } from '../public/settings.js';
+import { setupLibraryMenus } from '../public/library.js';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 class Element {
@@ -56,6 +57,45 @@ function environment(t, root) {
   return images;
 }
 function add(root, id, tag = 'div') { const node = new Element(tag, id); root.append(node); return node; }
+
+function libraryMenus() {
+  const dialog = new Element('dialog'), grid = add(dialog, 'library-grid');
+  const cards = ['one', 'two', 'three'].map(id => {
+    const card = add(grid, id); card.className = 'photo-card';
+    const button = add(card, undefined, 'button'); button.closest = () => card;
+    button.matches = selector => selector === ':focus-visible';
+    return { card, button };
+  });
+  const windowTarget = new Element(), documentTarget = new Element();
+  setupLibraryMenus(dialog, grid, { windowTarget, documentTarget });
+  return { dialog, cards, windowTarget, documentTarget, shown: () => cards.filter(({ card }) => card.classList.contains('menu-active')).map(({ card }) => card.id) };
+}
+
+test('library menus have one owner across touch, keyboard focus and mouse movement', () => {
+  const { dialog, cards, shown } = libraryMenus();
+  dialog.emit('pointerdown', { pointerType: 'touch', target: cards[0].button });
+  assert.deepEqual(shown(), ['one']);
+  dialog.emit('focusin', { target: cards[1].button });
+  assert.deepEqual(shown(), ['two']);
+  dialog.emit('pointermove', { pointerType: 'mouse', target: cards[2].button });
+  assert.deepEqual(shown(), ['three']);
+  dialog.emit('focusout', { relatedTarget: cards[2].button });
+  assert.deepEqual(shown(), ['three']);
+  dialog.emit('pointermove', { pointerType: 'mouse', target: dialog });
+  assert.deepEqual(shown(), []);
+});
+
+test('library menus reset when switching windows, hiding the tab, leaving or closing the library', () => {
+  const { dialog, cards, windowTarget, documentTarget, shown } = libraryMenus();
+  const activate = () => dialog.emit('pointermove', { pointerType: 'mouse', target: cards[0].button });
+  for (const [target, event] of [[windowTarget, 'blur'], [documentTarget, 'visibilitychange'], [dialog, 'pointerleave'], [dialog, 'close']]) {
+    activate(); assert.deepEqual(shown(), ['one']);
+    target.emit(event, { pointerType: 'mouse' }); assert.deepEqual(shown(), []);
+  }
+  activate(); cards[0].card.remove();
+  dialog.emit('pointerover', { pointerType: 'mouse', target: cards[1].button });
+  assert.deepEqual(shown(), ['two']);
+});
 
 test('viewer retains the displayed photo until the next is decoded and ignores late navigation results', async t => {
   const dialog = new Element('dialog'), wrap = add(dialog, undefined); wrap.className = 'viewer-image-wrap'; add(wrap, 'viewer-image', 'img');

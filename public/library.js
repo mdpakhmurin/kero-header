@@ -71,6 +71,36 @@ export function sortLibraryPhotos(photos, key = 'date', direction = 'desc') {
   });
 }
 
+export function setupLibraryMenus(dialog, grid, { windowTarget = window, documentTarget = document } = {}) {
+  let active = null;
+  function activate(card) {
+    const next = card && grid.contains(card) ? card : null;
+    if (active === next) return;
+    active?.classList.remove('menu-active');
+    active = next;
+    active?.classList.add('menu-active');
+  }
+  const reset = () => activate(null);
+  const cardAt = target => target?.closest?.('.photo-card');
+  dialog.addEventListener('pointerover', event => {
+    if (event.pointerType !== 'touch') activate(cardAt(event.target));
+  });
+  dialog.addEventListener('pointermove', event => {
+    if (event.pointerType !== 'touch') activate(cardAt(event.target));
+  });
+  dialog.addEventListener('pointerdown', event => activate(cardAt(event.target)));
+  dialog.addEventListener('pointerleave', event => { if (event.pointerType !== 'touch') reset(); });
+  dialog.addEventListener('focusin', event => {
+    if (event.target.matches?.(':focus-visible')) activate(cardAt(event.target));
+  });
+  dialog.addEventListener('focusout', event => {
+    if (!active?.contains(event.relatedTarget)) reset();
+  });
+  dialog.addEventListener('close', reset);
+  windowTarget.addEventListener('blur', reset);
+  documentTarget.addEventListener('visibilitychange', reset);
+}
+
 export function photoSource(photo) {
   if (/^https:\/\/(?:vk\.ru|vk\.com)\/wall-?\d+_\d+$/.test(photo.postPage || '')) {
     return { href: photo.postPage, label: 'Открыть пост VK' };
