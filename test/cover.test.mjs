@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { coverCommunity, coverImage, installCover } from '../lib/cover.mjs';
@@ -16,7 +16,7 @@ function coverPNG(width, height) {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.alloc((width * 4 + 1) * height))), chunk('IEND', Buffer.alloc(0))]);
 }
 
-const png = await readFile(new URL('../public/assets/pigeon.png', import.meta.url));
+const png = coverPNG(640, 640);
 const image = coverImage(png.toString('base64'));
 
 test('cover target accepts VK names and links but rejects other sites and deep links', () => {

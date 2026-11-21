@@ -297,6 +297,10 @@ test('HTTP import, persistence, missing-file detection and local-only protection
   for (const route of ['/settings.js', '/history.js', '/coverage.js', '/viewer.js', '/favicon.svg']) assert.equal((await fetch(base + route)).status, 200);
   assert.match((await fetch(base + '/favicon.svg')).headers.get('content-type'), /image\/svg\+xml/);
   assert.match((await fetch(base + '/assets/favicon.svg')).headers.get('content-type'), /image\/svg\+xml/);
+  const icon = await fetch(base + '/assets/favicon.ico');
+  assert.equal(icon.status, 200); assert.match(icon.headers.get('content-type'), /image\/vnd\.microsoft\.icon/);
+  assert.deepEqual(Buffer.from(await icon.arrayBuffer()).subarray(0, 4), Buffer.from([0, 0, 1, 0]));
+  assert.equal((await fetch(base + '/favicon.ico')).status, 200);
   assert.equal((await fetch(base + '/demo.js')).status, 200);
   assert.equal((await fetch(base + '/auth.js')).status, 200);
   assert.equal((await post('/api/images/open-folder', {}, { Origin: 'https://evil.example' })).status, 403);

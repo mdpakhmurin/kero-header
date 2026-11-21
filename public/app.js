@@ -487,7 +487,6 @@ function photoIcon(name) {
     restore: '<path d="M3 10h11a6 6 0 0 1 0 12M3 10l5-5m-5 5 5 5"/>',
     favorite: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z"/>',
     rename: '<path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/>',
-    delete: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7"/>',
     more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   };
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -544,9 +543,9 @@ function renderLibrary({ append = false } = {}) {
       const star = document.createElement('button'); star.type = 'button'; star.className = 'photo-toggle photo-favorite'; star.append(photoIcon('favorite'));
       const view = document.createElement('button'); view.type = 'button'; view.className = 'photo-toggle photo-view'; view.append(photoIcon('view'));
       const rename = document.createElement('button'); rename.type = 'button'; rename.className = 'photo-toggle photo-rename'; rename.append(photoIcon('rename'));
-      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'photo-toggle photo-delete'; remove.append(photoIcon('delete'));
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'photo-toggle photo-delete'; remove.append(photoIcon('exclude'));
       const more = document.createElement('button'); more.type = 'button'; more.className = 'photo-toggle photo-more'; more.append(photoIcon('more'));
-      actions.append(star, rename, remove, view, more); card.append(preview, badge, actions);
+      actions.append(rename, remove, view, more); card.append(preview, badge, star, actions);
     }
     card.classList.toggle('excluded', excluded.has(photo.id)); card.classList.toggle('selected', libraryChosen.has(photo.id));
     const preview = card.querySelector('.photo-image'), actions = card.querySelector('.photo-actions');
@@ -614,9 +613,14 @@ function openLibrary() {
   closeCoverSizes(); libraryChosen.clear(); librarySession++; limit = 60;
   libraryDialog.showModal(); renderLibrary(); $('#library-content').scrollTop = 0;
 }
+libraryDialog.addEventListener('pointerdown', event => {
+  const touched = event.pointerType === 'touch' ? event.target.closest('.photo-card') : null;
+  for (const card of $('#library-grid').children) card.classList.toggle('touch-active', card === touched);
+});
 document.querySelectorAll('[data-open-library]').forEach(button => button.onclick = openLibrary);
 $('#library-close').onclick = $('#library-cancel').onclick = () => libraryDialog.close();
 libraryDialog.addEventListener('close', () => {
+  for (const card of $('#library-grid').children) card.classList.remove('touch-active');
   favoritesView.reset();
   librarySession++; libraryChosen.clear(); libraryObserver.unobserve($('#library-sentinel'));
   if (libraryFrame !== null) { cancelAnimationFrame(libraryFrame); libraryFrame = null; }
@@ -716,7 +720,7 @@ $('#photo-name-form').onsubmit = async event => {
 };
 $('#photo-name-dialog').addEventListener('cancel', event => { if (renamingBusy) event.preventDefault(); });
 const photoActions = $('#photo-actions-dialog'); let menuPhoto, menuCollection;
-for (const [id, icon] of [['view', 'view'], ['favorite', 'favorite'], ['rename', 'rename'], ['delete', 'delete'], ['source', 'source']]) $('#photo-action-' + id).prepend(photoIcon(icon));
+for (const [id, icon] of [['view', 'view'], ['favorite', 'favorite'], ['rename', 'rename'], ['delete', 'exclude'], ['source', 'source']]) $('#photo-action-' + id).prepend(photoIcon(icon));
 function openPhotoActions(photo, collection) {
   menuPhoto = photo; menuCollection = collection;
   $('#photo-actions-title').textContent = photo.title;

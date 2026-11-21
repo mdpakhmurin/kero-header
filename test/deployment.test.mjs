@@ -24,7 +24,7 @@ test('static demo is forced, uses current shared sources and contains only deplo
   assert.doesNotMatch(html, /(?:src|href)="\/(?!\/)/);
   assert.match(html, /data-mode-choice="local" hidden aria-hidden="true" tabindex="-1"><\/button>/);
   for (const file of result.files.filter(file => /\.(js|css)$/.test(file))) assert.equal(await readFile(join(output, file), 'utf8'), await readFile(new URL('public/' + file, project), 'utf8'));
-  assert.ok(result.files.includes('assets/favicon.svg')); assert.ok(result.files.includes('.nojekyll'));
+  assert.ok(result.files.includes('assets/favicon.svg')); assert.ok(result.files.includes('assets/favicon.ico')); assert.ok(result.files.includes('.nojekyll'));
   const names = await readdir(output); for (const name of ['.env', 'stale.env', 'server.mjs', 'data', 'lib', '.git']) assert.equal(names.includes(name), false);
   await assert.rejects(buildDemo({ outputRoot: root, outputDir: root }), /direct child/);
   await assert.rejects(buildDemo({ outputRoot: root, outputDir: join(root, '../outside') }), /direct child/);
