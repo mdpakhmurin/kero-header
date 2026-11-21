@@ -1,12 +1,47 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, stat, mkdir, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server.mjs';
 import { stopApp } from '../lib/shutdown.mjs';
+import { acquireAppLock } from '../lib/app-lock.mjs';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1ioAAAAASUVORK5CYII=', 'base64');
+
+test('stale Windows locks pointing to a different application do not block start or stop', { skip: process.platform !== 'win32', timeout: 20000 }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'kero-stale-lock-'));
+  const other = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "[Console]::WriteLine('ready'); Start-Sleep -Seconds 30"], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  t.after(async () => { other.kill(); await rm(root, { recursive: true, force: true }); });
+  await once(other.stdout, 'data');
+  const file = join(root, 'data/app.lock'); await mkdir(join(root, 'data'));
+  const stale = { pid: other.pid, port: 3210, nonce: 'old-server', instanceId: null };
+  await writeFile(file, JSON.stringify(stale));
+  assert.equal(await stopApp(root), false);
+  await assert.rejects(stat(file), { code: 'ENOENT' });
+  assert.equal(other.exitCode, null);
+  await writeFile(file, JSON.stringify(stale));
+  const release = acquireAppLock(root);
+  try {
+    const current = JSON.parse(await readFile(file, 'utf8'));
+    assert.equal(current.pid, process.pid); assert.match(current.instanceId, /^win32:/);
+    assert.throws(() => acquireAppLock(root), error => error.code === 'APP_ALREADY_RUNNING');
+    assert.equal(other.exitCode, null);
+  } finally { release(); }
+});
+
+test('stop removes a stale lock for a reused server PID without stopping its new owner', { skip: !['linux', 'win32'].includes(process.platform) }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'kero-reused-lock-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'data'));
+  const file = join(root, 'data/app.lock');
+  await writeFile(file, JSON.stringify({ pid: process.pid, nonce: 'old', instanceId: 'a-previous-server' }));
+  assert.equal(await stopApp(root), false);
+  await assert.rejects(stat(file), { code: 'ENOENT' });
+});
+
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'kero-shutdown-test-')), servers = [];
   t.after(async () => { for (const server of servers) if (server.listening) await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });

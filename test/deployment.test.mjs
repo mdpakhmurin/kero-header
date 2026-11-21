@@ -67,7 +67,7 @@ test('public origins accept Docker port mappings and HTTPS proxies while rejecti
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
-test('Docker restart can recover a lock whose PID has been reused by a new Linux process', { skip: process.platform !== 'linux' }, async t => {
+test('startup recovers a reused PID while protecting the current server on Windows and Linux', { skip: !['linux', 'win32'].includes(process.platform) }, async t => {
   const root = await temporary(t); await mkdir(join(root, 'data'));
   await writeFile(join(root, 'data/app.lock'), JSON.stringify({ pid: process.pid, nonce: 'old', instanceId: 'old-container-process' }));
   const release = acquireAppLock(root);

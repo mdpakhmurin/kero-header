@@ -7,5 +7,6 @@ config/layout.json
 .env.*
 !.env.example
 exports/
+ads/
 *.tmp
 *.log
